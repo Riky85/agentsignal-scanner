@@ -45,7 +45,7 @@ WORKER_ID     = int(os.environ.get("WORKER_ID", "0"))
 TOTAL_WORKERS = int(os.environ.get("TOTAL_WORKERS", "3"))
 THREADS       = int(os.environ.get("THREADS", "30"))
 BATCH_SIZE    = int(os.environ.get("BATCH_SIZE", "500"))
-RESCAN_DAYS   = int(os.environ.get("RESCAN_DAYS", "0"))   # 0 = rescan tutto
+RESCAN_DAYS   = int(os.environ.get("RESCAN_DAYS", "14"))
 PORT          = int(os.environ.get("PORT", "8080"))
 MODE          = os.environ.get("MODE", "scanner")  # scanner | importer | syncer
 
@@ -1545,26 +1545,24 @@ async def ensure_schema(pool):
                 log.warning(f"Migration skip: {e}")
     log.info("=0] Schema DB OK")
 
-    # Worker 0: resetta last_scan_date → forza riscansione completa di tutto il DB
-    if WORKER_ID == 0 and os.environ.get("SKIP_RESET","0") != "1":
-        async with pool.acquire() as conn:
-            n = await conn.fetchval("SELECT COUNT(*) FROM companies WHERE last_scan_date IS NOT NULL")
-            await conn.execute("UPDATE companies SET last_scan_date = NULL")
-        log.info(f"=0] FULL RESCAN RESET: {n:,} record azzerati — ripartenza totale")
-
-
 
 async def write_scan_result(pool, result: dict):
     if not result: return
-    # Normalizza valori jsonb — asyncpg richiede stringhe JSON valide o None
-    biz  = result.get("biz_stack") or "{}"
-    orc  = result.get("org_chart") or "[]"
+    # Normalizza jsonb: asyncpg richiede dict/list Python, non stringhe JSON
+    try:
+        biz_raw = result.get("biz_stack") or "{}"
+        biz = json.loads(biz_raw) if isinstance(biz_raw, str) else (biz_raw or {})
+    except Exception: biz = {}
+    try:
+        orc_raw = result.get("org_chart") or "[]"
+        orc = json.loads(orc_raw) if isinstance(orc_raw, str) else (orc_raw or [])
+    except Exception: orc = []
     async with pool.acquire() as conn:
         await conn.execute("""
             UPDATE companies SET
                 ai_stack        = $1,
                 tech_stack      = $2,
-                biz_stack       = $3::jsonb,
+                biz_stack       = $3,
                 ai_score        = $4,
                 maturity_score  = $5,
                 cloud_score     = $6,
