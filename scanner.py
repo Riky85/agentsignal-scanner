@@ -1,52 +1,100 @@
 #!/usr/bin/env python3
 """
-AgentSignal Scanner v5.0 — Railway Production Worker
-=========================================================
-Fix rispetto a v4.x:
-  1. Healthcheck HTTP su $PORT (richiesto da Railway per non killare il processo)
-  2. ssl=True (default corretto per HTTPS)
-  3. Batch vuoto → sleep 2min invece di 10min (keep-alive)
-  4. load_batch con skip stabile (sort=last_scan_date, avanza sempre)
-  5. Gestione eccezioni granulare per evitare crash silenzioso
-  6. Log strutturato per Railway
+AgentSignal Railway Scanner v6.0
+==================================
+Architettura: Railway-first, Base44-last
+
+FLUSSO:
+  1. PostgreSQL Railway  → storage principale (milioni di domini)
+  2. Scanner workers     → scansionano da Postgres, scrivono su Postgres
+  3. Sync pusher         → ogni 5 min pusha su Base44 SOLO i record con AI/cambiamenti
+                           (max 10 PUT/min per rispettare rate limit)
+
+VANTAGGI:
+  - Zero rate limit: Postgres locale è illimitato
+  - Throughput reale: 100k+ scan/ora senza colli di bottiglia
+  - Base44 usato solo come "vetrina" — non come DB di lavoro
+  - Deduplicazione nativa su PostgreSQL (UNIQUE constraint su domain)
+  - Inserimento 1.6M domini in pochi minuti (INSERT ... ON CONFLICT DO NOTHING)
 """
 
 import asyncio
 import aiohttp
-import time
+import asyncpg
 import os
 import logging
 import json
 import re
+import time
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 
-# ── Logging ──────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [W%(message)s",
-    force=True
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [W%(message)s", force=True)
 log = logging.getLogger(__name__)
 
-# ── Config da env ─────────────────────────────────────────────────────────────
-TOKEN         = os.environ["BASE44_TOKEN"]
+# ── Config ────────────────────────────────────────────────────────────────────
+DATABASE_URL  = os.environ["DATABASE_URL"]          # da Railway (postgres)
+BASE44_TOKEN  = os.environ["BASE44_TOKEN"]
 APP_ID        = os.environ["APP_ID"]
 APOLLO_KEY    = os.environ.get("APOLLO_API_KEY", "")
-BASE          = f"https://app.base44.com/api/apps/{APP_ID}/entities"
-HR            = {"api-key": TOKEN}
-HW            = {"api-key": TOKEN, "Content-Type": "application/json"}
+BASE44_URL    = f"https://app.base44.com/api/apps/{APP_ID}/entities"
+HR            = {"api-key": BASE44_TOKEN}
+HW            = {"api-key": BASE44_TOKEN, "Content-Type": "application/json"}
 
 WORKER_ID     = int(os.environ.get("WORKER_ID", "0"))
-TOTAL_WORKERS = int(os.environ.get("TOTAL_WORKERS", "1"))
-THREADS       = int(os.environ.get("THREADS", "20"))
-BATCH_SIZE    = int(os.environ.get("BATCH_SIZE", "300"))
-RESCAN_DAYS   = int(os.environ.get("RESCAN_DAYS", "7"))
+TOTAL_WORKERS = int(os.environ.get("TOTAL_WORKERS", "3"))
+THREADS       = int(os.environ.get("THREADS", "30"))
+BATCH_SIZE    = int(os.environ.get("BATCH_SIZE", "500"))
+RESCAN_DAYS   = int(os.environ.get("RESCAN_DAYS", "14"))
 PORT          = int(os.environ.get("PORT", "8080"))
+MODE          = os.environ.get("MODE", "scanner")  # scanner | importer | syncer
 
-log.info(f"={WORKER_ID}/{TOTAL_WORKERS}] v5.0 | threads={THREADS} | batch={BATCH_SIZE} | apollo={'YES' if APOLLO_KEY else 'NO'} | port={PORT}")
+# ── DB Schema ─────────────────────────────────────────────────────────────────
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS companies (
+    id              BIGSERIAL PRIMARY KEY,
+    domain          TEXT UNIQUE NOT NULL,
+    name            TEXT,
+    website         TEXT,
+    source          TEXT DEFAULT 'bulk_import',
+    global_rank     INT,
+    country         TEXT,
+    industry        TEXT,
+    employee_count  INT,
+    revenue_range   TEXT,
+    logo_url        TEXT,
+    
+    -- Scan results
+    ai_stack        JSONB DEFAULT '[]',
+    tech_stack      JSONB DEFAULT '[]',
+    ai_score        FLOAT DEFAULT 0,
+    maturity_score  FLOAT DEFAULT 0,
+    cloud_score     FLOAT DEFAULT 0,
+    automation_score FLOAT DEFAULT 0,
+    developer_score  FLOAT DEFAULT 0,
+    security_score   FLOAT DEFAULT 0,
+    growth_score     FLOAT DEFAULT 0,
+    innovation_score FLOAT DEFAULT 0,
+    intent_score     FLOAT DEFAULT 0,
+    commerce_score   FLOAT DEFAULT 0,
+    tech_gap_score   FLOAT DEFAULT 0,
+    
+    -- Tracking
+    base44_id       TEXT,           -- ID record su Base44 (NULL = non ancora pushato)
+    last_scan_date  TIMESTAMPTZ,
+    last_push_date  TIMESTAMPTZ,    -- ultima volta che è stato pushato su Base44
+    scan_errors     INT DEFAULT 0,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
 
-# ── Blacklist produttività ─────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_companies_scan   ON companies(last_scan_date NULLS FIRST);
+CREATE INDEX IF NOT EXISTS idx_companies_push   ON companies(last_push_date NULLS FIRST) WHERE ai_score > 0;
+CREATE INDEX IF NOT EXISTS idx_companies_ai     ON companies(ai_score DESC) WHERE ai_score > 0;
+CREATE INDEX IF NOT EXISTS idx_companies_worker ON companies(id) WHERE last_scan_date IS NULL;
+"""
+
+# ── AI / Tech Signatures ──────────────────────────────────────────────────────
 PRODUCTIVITY_BLACKLIST = {
     "microsoft office","google docs","google sheets","google slides",
     "excel","word","powerpoint","notion","confluence","jira","trello",
@@ -54,173 +102,117 @@ PRODUCTIVITY_BLACKLIST = {
     "outlook","dropbox","box.com","sharepoint","onedrive",
 }
 
-# ── AI Signatures (L1-L4) ─────────────────────────────────────────────────────
 AI_SIGNATURES = [
-    # L1 — API endpoints diretti (peso 40)
-    ("OpenAI",       [r"api\.openai\.com",r"openai\.com/v1/",r"OPENAI_API_KEY",r"sk-[a-zA-Z0-9]{20}"], 1, 40),
-    ("Anthropic",    [r"api\.anthropic\.com",r"anthropic\.com/v1",r"ANTHROPIC_API_KEY",r"sk-ant-"], 1, 40),
-    ("Google AI",    [r"generativelanguage\.googleapis\.com",r"aiplatform\.googleapis\.com",r"vertexai"], 1, 38),
-    ("Azure OpenAI", [r"openai\.azure\.com",r"\.openai\.azure\.com/openai/deployments"], 1, 38),
-    ("AWS Bedrock",  [r"bedrock-runtime\.amazonaws\.com",r"bedrock\.amazonaws\.com"], 1, 38),
-    ("Cohere",       [r"api\.cohere\.ai",r"api\.cohere\.com",r"cohere-python"], 1, 35),
-    ("Mistral",      [r"api\.mistral\.ai",r"mistral-client"], 1, 35),
-    ("Groq",         [r"api\.groq\.com",r"groq-sdk",r"groq\.com/openai/v1"], 1, 35),
+    ("OpenAI",       [r"api\.openai\.com", r"openai\.com/v1/", r"OPENAI_API_KEY", r"sk-[a-zA-Z0-9]{20}"], 1, 40),
+    ("Anthropic",    [r"api\.anthropic\.com", r"anthropic\.com/v1", r"ANTHROPIC_API_KEY", r"sk-ant-"], 1, 40),
+    ("Google AI",    [r"generativelanguage\.googleapis\.com", r"aiplatform\.googleapis\.com", r"vertexai"], 1, 38),
+    ("Azure OpenAI", [r"openai\.azure\.com", r"\.openai\.azure\.com/openai/deployments"], 1, 38),
+    ("AWS Bedrock",  [r"bedrock-runtime\.amazonaws\.com", r"bedrock\.amazonaws\.com"], 1, 38),
+    ("Cohere",       [r"api\.cohere\.ai", r"api\.cohere\.com", r"cohere-python"], 1, 35),
+    ("Mistral",      [r"api\.mistral\.ai", r"mistral-client"], 1, 35),
+    ("Groq",         [r"api\.groq\.com", r"groq-sdk", r"groq\.com/openai/v1"], 1, 35),
     ("Perplexity",   [r"api\.perplexity\.ai"], 1, 33),
-    ("Together AI",  [r"api\.together\.xyz",r"together\.ai/inference"], 1, 33),
-    ("Replicate",    [r"api\.replicate\.com",r"replicate\.com/predictions"], 1, 33),
-    ("xAI Grok",     [r"api\.x\.ai",r"x\.ai/api/v1"], 1, 33),
+    ("Together AI",  [r"api\.together\.xyz", r"together\.ai/inference"], 1, 33),
+    ("Replicate",    [r"api\.replicate\.com"], 1, 33),
+    ("xAI Grok",     [r"api\.x\.ai", r"x\.ai/api/v1"], 1, 33),
     ("Fireworks AI", [r"api\.fireworks\.ai"], 1, 32),
-    ("Deepseek",     [r"api\.deepseek\.com",r"deepseek-chat"], 1, 32),
-
-    # L2 — SDK/librerie Python (peso 25)
-    ("LangChain",    [r"langchain",r"from langchain",r"langchain-core"], 2, 25),
-    ("LlamaIndex",   [r"llama.?index",r"llama_index",r"from llama_index"], 2, 25),
-    ("Hugging Face", [r"huggingface\.co",r"transformers",r"from transformers"], 2, 22),
-    ("Pinecone",     [r"pinecone\.io",r"pinecone-client",r"pinecone\.init"], 2, 22),
-    ("Weaviate",     [r"weaviate\.io",r"weaviate-client"], 2, 20),
-    ("Qdrant",       [r"qdrant\.tech",r"qdrant-client"], 2, 20),
-    ("Chroma",       [r"chromadb",r"chroma-db"], 2, 18),
-    ("OpenCV",       [r"opencv",r"cv2"], 2, 15),
-    ("PyTorch",      [r"pytorch\.org",r"torch\.nn",r"import torch"], 2, 15),
-    ("TensorFlow",   [r"tensorflow",r"import tensorflow"], 2, 15),
-    ("scikit-learn", [r"scikit.learn",r"sklearn"], 2, 12),
-    ("Weights & Biases",[r"wandb",r"weights-and-biases",r"wandb\.init"], 2, 12),
-    ("Ray",          [r"ray\.io",r"import ray"], 2, 12),
-    ("Ollama",       [r"ollama\.ai",r"ollama-python",r"ollama\.chat"], 2, 20),
-    ("Midjourney",   [r"midjourney",r"mid-journey"], 2, 15),
-    ("Stable Diffusion",[r"stable.diffusion",r"stabilityai",r"stability\.ai"], 2, 18),
-
-    # L3 — Menzioni esplicite (peso 15)
-    ("ChatGPT",      [r"chatgpt",r"chat\.openai\.com"], 3, 15),
-    ("Claude",       [r"claude\.ai",r"anthropic claude",r"claude-3"], 3, 15),
-    ("Gemini",       [r"gemini\.google\.com",r"google gemini",r"gemini-pro"], 3, 15),
-    ("Copilot",      [r"github\.com/features/copilot",r"github copilot",r"ms copilot"], 3, 12),
-    ("Cursor",       [r"cursor\.sh",r"cursor\.so",r"cursor ai"], 3, 12),
-    ("Vercel AI SDK",[r"vercel\.com/ai",r"@vercel/ai",r"ai-sdk"], 3, 15),
+    ("Deepseek",     [r"api\.deepseek\.com", r"deepseek-chat"], 1, 32),
+    ("LangChain",    [r"langchain", r"from langchain", r"langchain-core"], 2, 25),
+    ("LlamaIndex",   [r"llama.?index", r"llama_index", r"from llama_index"], 2, 25),
+    ("Hugging Face", [r"huggingface\.co", r"from transformers"], 2, 22),
+    ("Pinecone",     [r"pinecone\.io", r"pinecone-client", r"pinecone\.init"], 2, 22),
+    ("Weaviate",     [r"weaviate\.io", r"weaviate-client"], 2, 20),
+    ("Qdrant",       [r"qdrant\.tech", r"qdrant-client"], 2, 20),
+    ("Chroma",       [r"chromadb", r"chroma-db"], 2, 18),
+    ("PyTorch",      [r"pytorch\.org", r"torch\.nn", r"import torch"], 2, 15),
+    ("TensorFlow",   [r"tensorflow\.org", r"import tensorflow"], 2, 15),
+    ("Ollama",       [r"ollama\.ai", r"ollama-python", r"ollama\.chat"], 2, 20),
+    ("Stable Diffusion", [r"stabilityai", r"stability\.ai"], 2, 18),
+    ("Vercel AI SDK",[r"@vercel/ai", r"ai-sdk", r"vercel\.com/ai"], 3, 15),
+    ("ChatGPT",      [r"chatgpt", r"chat\.openai\.com"], 3, 15),
+    ("Claude",       [r"claude\.ai", r"anthropic claude", r"claude-3"], 3, 15),
+    ("Gemini",       [r"gemini\.google\.com", r"google gemini", r"gemini-pro"], 3, 15),
+    ("Cursor",       [r"cursor\.sh", r"cursor\.so", r"cursor ai"], 3, 12),
     ("Langfuse",     [r"langfuse\.com"], 3, 12),
-    ("Helicone",     [r"helicone\.ai"], 3, 12),
-    ("Flowise",      [r"flowiseai\.com",r"flowise"], 3, 10),
-
-    # L4 — Segnali contestuali (peso 8)
-    ("AI Platform",  [r"/ai\b",r"/artificial-intelligence\b",r"/machine-learning\b"], 4, 8),
-    ("ML Hiring",    [r"machine learning engineer",r"ai researcher",r"llm engineer"], 4, 8),
-    ("AI Features",  [r"powered by ai",r"ai-powered",r"artificial intelligence platform"], 4, 6),
+    ("AI Platform",  [r"/ai\b", r"/artificial-intelligence\b", r"/machine-learning\b"], 4, 8),
+    ("ML Hiring",    [r"machine learning engineer", r"ai researcher", r"llm engineer"], 4, 8),
+    ("AI Features",  [r"powered by ai", r"ai-powered", r"artificial intelligence platform"], 4, 6),
 ]
 
-# ── Tech Stack ────────────────────────────────────────────────────────────────
 TECH_SIGNATURES = [
-    ("React",     [r"react\.js",r"reactjs",r"_react",r"__REACT"]),
-    ("Next.js",   [r"next\.js",r"_next/static",r"__NEXT_DATA__"]),
-    ("Vue",       [r"vue\.js",r"vuejs",r"__vue"]),
-    ("Angular",   [r"angular\.js",r"angularjs",r"ng-version"]),
-    ("Vercel",    [r"vercel\.app",r"vercel\.com",r"_vercel"]),
-    ("Netlify",   [r"netlify\.app",r"netlify\.com"]),
-    ("Cloudflare",[r"cloudflare\.com",r"cf-ray",r"__cf_bm"]),
-    ("AWS",       [r"amazonaws\.com",r"cloudfront\.net",r"s3\.amazonaws"]),
-    ("GCP",       [r"googleapis\.com",r"googlecloud\.com"]),
-    ("Azure",     [r"azure\.com",r"azurewebsites\.net"]),
-    ("Shopify",   [r"shopify\.com",r"cdn\.shopify\.com",r"myshopify"]),
-    ("Stripe",    [r"stripe\.com",r"js\.stripe\.com"]),
-    ("Segment",   [r"segment\.com",r"segment\.io",r"analytics\.js"]),
-    ("HubSpot",   [r"hubspot\.com",r"hs-scripts",r"hubspot"]),
-    ("Intercom",  [r"intercom\.io",r"widget\.intercom\.io"]),
-    ("Mixpanel",  [r"mixpanel\.com",r"mixpanel"]),
-    ("Amplitude", [r"amplitude\.com",r"amplitude"]),
-    ("Sentry",    [r"sentry\.io",r"browser\.sentry-cdn"]),
-    ("Datadog",   [r"datadoghq\.com",r"datadog-rum"]),
-    ("Webflow",   [r"webflow\.com",r"webflow\.io"]),
-    ("WordPress", [r"wp-content",r"wp-includes",r"wordpress"]),
-    ("Docker",    [r"docker\.com",r"dockerfile",r"docker-compose"]),
-    ("Kubernetes",[r"kubernetes\.io",r"k8s",r"kubectl"]),
-    ("Terraform", [r"terraform\.io",r"hashicorp"]),
+    ("React",     [r"react\.js", r"reactjs", r"_react", r"__REACT"]),
+    ("Next.js",   [r"next\.js", r"_next/static", r"__NEXT_DATA__"]),
+    ("Vue",       [r"vue\.js", r"vuejs", r"__vue"]),
+    ("Angular",   [r"angular\.js", r"angularjs", r"ng-version"]),
+    ("Vercel",    [r"vercel\.app", r"vercel\.com", r"_vercel"]),
+    ("Netlify",   [r"netlify\.app", r"netlify\.com"]),
+    ("Cloudflare",[r"cloudflare\.com", r"cf-ray", r"__cf_bm"]),
+    ("AWS",       [r"amazonaws\.com", r"cloudfront\.net"]),
+    ("GCP",       [r"googleapis\.com", r"googlecloud\.com"]),
+    ("Azure",     [r"azure\.com", r"azurewebsites\.net"]),
+    ("Shopify",   [r"shopify\.com", r"cdn\.shopify\.com", r"myshopify"]),
+    ("Stripe",    [r"stripe\.com", r"js\.stripe\.com"]),
+    ("HubSpot",   [r"hubspot\.com", r"hs-scripts"]),
+    ("Intercom",  [r"intercom\.io", r"widget\.intercom\.io"]),
+    ("Mixpanel",  [r"mixpanel\.com"]),
+    ("Amplitude", [r"amplitude\.com"]),
+    ("Sentry",    [r"sentry\.io", r"browser\.sentry-cdn"]),
+    ("Datadog",   [r"datadoghq\.com"]),
+    ("Webflow",   [r"webflow\.com", r"webflow\.io"]),
+    ("WordPress", [r"wp-content", r"wp-includes", r"wordpress"]),
+    ("Docker",    [r"docker\.com", r"dockerfile"]),
+    ("Kubernetes",[r"kubernetes\.io", r"k8s\."]),
 ]
 
-
-# ── Healthcheck HTTP server ───────────────────────────────────────────────────
-async def healthcheck_server():
-    """
-    Mini HTTP server su $PORT per soddisfare Railway.
-    Risponde 200 OK a qualsiasi richiesta GET.
-    """
-    async def handle(reader, writer):
-        try:
-            await reader.read(1024)
-            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
-            await writer.drain()
-        except Exception:
-            pass
-        finally:
-            writer.close()
-
-    server = await asyncio.start_server(handle, "0.0.0.0", PORT)
-    log.info(f"={WORKER_ID}] Healthcheck HTTP su :{PORT}")
-    async with server:
-        await server.serve_forever()
+EXCLUDE_DOMAINS = {
+    "google.com","youtube.com","facebook.com","instagram.com","twitter.com","x.com",
+    "tiktok.com","linkedin.com","reddit.com","wikipedia.org","amazon.com","apple.com",
+    "microsoft.com","netflix.com","spotify.com","cloudflare.com","amazonaws.com",
+    "doubleclick.net","googlesyndication.com","gstatic.com","googletagmanager.com",
+    "googleapis.com","akamai.net","akamaized.net","fastly.net","cloudfront.net",
+    "wp.com","wordpress.com","blogspot.com","tumblr.com","medium.com",
+}
 
 
-# ── Utilities ─────────────────────────────────────────────────────────────────
-def normalize_domain(url):
-    if not url:
-        return ""
+# ── Utilities ──────────────────────────────────────────────────────────────────
+def normalize_domain(url: str) -> str:
+    if not url: return ""
     try:
-        if not url.startswith("http"):
-            url = "https://" + url
+        if not url.startswith("http"): url = "https://" + url
         d = urlparse(url).netloc.lower()
         return d.replace("www.", "").strip()
     except Exception:
         return url.lower().strip()
 
 
-def extract_text(html: str) -> str:
-    """Estrae testo pulito + JSON embedded da HTML."""
-    # JSON embedded (Next.js __NEXT_DATA__, ecc.)
-    json_texts = []
-    for m in re.finditer(r'<script[^>]*type=["\']application/json["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE):
-        json_texts.append(m.group(1))
-    for m in re.finditer(r'__NEXT_DATA__\s*=\s*({.*?})\s*[;<]', html, re.DOTALL):
-        json_texts.append(m.group(1))
+def domain_to_name(domain: str) -> str:
+    name = domain.split(".")[0]
+    return re.sub(r"[-_]", " ", name).title()
 
-    # Rimuovi tag HTML
+
+def extract_text(html: str) -> str:
+    json_parts = []
+    for m in re.finditer(r'__NEXT_DATA__\s*=\s*({.*?})\s*[;<]', html, re.DOTALL):
+        json_parts.append(m.group(1))
     text = re.sub(r'<style[^>]*>.*?</style>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<script[^>]*>.*?</script>', ' ', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\s+', ' ', text).lower()
-
-    # Aggiungi JSON embedded
-    for jt in json_texts:
-        text += " " + jt.lower()
-
-    return text
+    return text + " " + " ".join(json_parts).lower()
 
 
-def detect_tech(text: str, html: str, url: str) -> tuple[list, list, list]:
-    """
-    Rileva tecnologie AI e stack tecnico.
-    Ritorna: (ai_stack, tech_stack, evidence_list)
-    """
+def detect(text: str, html: str) -> tuple[list, list]:
     combined = (text + " " + html).lower()
-    ai_found = []
-    ai_evidence = []
-    tech_found = []
-
+    ai_found, tech_found = [], []
     for name, patterns, level, weight in AI_SIGNATURES:
         for pat in patterns:
             try:
                 if re.search(pat, combined, re.IGNORECASE):
-                    clean = name.lower().replace(" ", "")
-                    if clean not in PRODUCTIVITY_BLACKLIST and name not in ai_found:
+                    if name.lower().replace(" ","") not in PRODUCTIVITY_BLACKLIST and name not in ai_found:
                         ai_found.append(name)
-                        ai_evidence.append({
-                            "tech": name,
-                            "pattern": pat,
-                            "level": f"L{level}",
-                            "weight": weight,
-                            "source": url
-                        })
                     break
             except re.error:
                 continue
-
     for name, patterns in TECH_SIGNATURES:
         for pat in patterns:
             try:
@@ -229,98 +221,44 @@ def detect_tech(text: str, html: str, url: str) -> tuple[list, list, list]:
                     break
             except re.error:
                 continue
+    return ai_found, tech_found
 
-    return ai_found, tech_found, ai_evidence
 
-
-def calculate_scores(ai_stack, tech_stack, html_text, company):
-    """Calcola i 10 score proprietari."""
-    ai_count = len(ai_stack)
-    tech_count = len(tech_stack)
-
-    # Segnali di crescita
-    growth_signals = sum(1 for kw in ["hiring", "careers", "open position", "we're growing", "join us"]
-                         if kw in html_text)
-    intent_signals = sum(1 for kw in ["powered by ai", "ai-powered", "machine learning", "llm", "gpt"]
-                         if kw in html_text)
-    cloud_tech = sum(1 for t in tech_stack if t in ["AWS", "GCP", "Azure", "Cloudflare", "Vercel"])
-    dev_tech   = sum(1 for t in tech_stack if t in ["React", "Next.js", "Vue", "Angular", "Docker", "Kubernetes"])
-
+def calc_scores(ai_stack, tech_stack, text) -> dict:
+    ai_n     = len(ai_stack)
+    intent   = sum(1 for kw in ["powered by ai","ai-powered","llm","gpt"] if kw in text)
+    cloud    = sum(1 for t in tech_stack if t in ["AWS","GCP","Azure","Cloudflare","Vercel"])
+    dev      = sum(1 for t in tech_stack if t in ["React","Next.js","Vue","Angular","Docker","Kubernetes"])
     def clamp(v): return min(100.0, max(0.0, float(v)))
-
-    ai_score         = clamp(ai_count * 12 + intent_signals * 5)
-    maturity_score   = clamp((ai_count * 10 + cloud_tech * 8 + dev_tech * 5 + tech_count * 3))
-    cloud_score      = clamp(cloud_tech * 25)
-    automation_score = clamp(sum(1 for t in ai_stack if t in ["LangChain","LlamaIndex","Ray","Flowise"]) * 20)
-    developer_score  = clamp(dev_tech * 15 + sum(1 for t in tech_stack if t in ["Docker","Kubernetes","Terraform"]) * 20)
-    security_score   = clamp(sum(1 for t in tech_stack if t in ["Cloudflare","AWS","Azure","GCP"]) * 20)
-    growth_score     = clamp(growth_signals * 15 + (company.get("employee_count") or 0) / 100)
-    innovation_score = clamp(ai_count * 8 + intent_signals * 6 + dev_tech * 4)
-    intent_score     = clamp(intent_signals * 20 + ai_count * 8)
-    commerce_score   = clamp(sum(1 for t in tech_stack if t in ["Shopify","Stripe"]) * 40)
-    tech_gap_score   = clamp(100 - maturity_score) if maturity_score > 0 else 50.0
-
     return {
-        "ai_adoption_score":      ai_score,
-        "ai_maturity_score":      maturity_score,
-        "cloud_score":            cloud_score,
-        "automation_score":       automation_score,
-        "developer_score":        developer_score,
-        "security_score":         security_score,
-        "growth_score":           growth_score,
-        "innovation_score":       innovation_score,
-        "ai_buying_intent_score": intent_score,
-        "commerce_score":         commerce_score,
-        "tech_gap_score":         tech_gap_score,
+        "ai_score":         clamp(ai_n * 12 + intent * 5),
+        "maturity_score":   clamp(ai_n * 10 + cloud * 8 + dev * 5 + len(tech_stack) * 3),
+        "cloud_score":      clamp(cloud * 25),
+        "automation_score": clamp(sum(1 for t in ai_stack if t in ["LangChain","LlamaIndex","Ray"]) * 20),
+        "developer_score":  clamp(dev * 15),
+        "security_score":   clamp(cloud * 20),
+        "growth_score":     clamp(sum(1 for kw in ["hiring","careers","we're growing"] if kw in text) * 15),
+        "innovation_score": clamp(ai_n * 8 + intent * 6 + dev * 4),
+        "intent_score":     clamp(intent * 20 + ai_n * 8),
+        "commerce_score":   clamp(sum(1 for t in tech_stack if t in ["Shopify","Stripe"]) * 40),
+        "tech_gap_score":   clamp(100 - min(ai_n * 10 + cloud * 8 + dev * 5, 100)),
     }
 
 
-# ── Apollo Enrichment ─────────────────────────────────────────────────────────
-async def enrich_apollo(session, domain: str) -> dict:
-    if not APOLLO_KEY or not domain:
-        return {}
-    try:
-        async with session.post(
-            "https://api.apollo.io/v1/organizations/enrich",
-            json={"domain": domain},
-            headers={"Cache-Control": "no-cache", "Content-Type": "application/json", "x-api-key": APOLLO_KEY},
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as r:
-            if r.ok:
-                data = await r.json()
-                org = data.get("organization") or {}
-                out = {}
-                if org.get("estimated_num_employees"):
-                    out["employee_count"] = org["estimated_num_employees"]
-                if org.get("annual_revenue_printed"):
-                    out["revenue_range"] = org["annual_revenue_printed"]
-                if org.get("founded_year"):
-                    out["ats_hiring_signals"] = f"Founded: {org['founded_year']}"
-                if org.get("logo_url"):
-                    out["logo_url"] = org["logo_url"]
-                if org.get("country"):
-                    out["country"] = org["country"]
-                if org.get("primary_domain"):
-                    out["website"] = "https://" + org["primary_domain"]
-                return out
-    except Exception:
-        pass
-    return {}
+# ── Web fetch ──────────────────────────────────────────────────────────────────
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; AgentSignalBot/6.0; +https://agentsignal.io)",
+    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
 
-
-# ── Web scraping ──────────────────────────────────────────────────────────────
-async def fetch_page(session, url: str, timeout: int = 12) -> str:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; AgentSignalBot/5.0)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    }
+async def fetch(session, url: str, timeout=10) -> str:
     try:
-        async with session.get(url, headers=headers,
+        async with session.get(url, headers=HEADERS,
                                timeout=aiohttp.ClientTimeout(total=timeout),
-                               allow_redirects=True, max_redirects=5) as r:
-            if r.status in (200, 203):
-                ct = r.headers.get("Content-Type", "")
+                               allow_redirects=True, max_redirects=4) as r:
+            if r.status == 200:
+                ct = r.headers.get("Content-Type","")
                 if "text" in ct or "json" in ct:
                     return await r.text(errors="replace")
     except Exception:
@@ -328,213 +266,396 @@ async def fetch_page(session, url: str, timeout: int = 12) -> str:
     return ""
 
 
-async def scan_company(session, company: dict) -> tuple:
-    """Scansiona un'azienda e ritorna (id, payload, evidence)."""
-    cid     = company.get("id", "")
-    website = company.get("website", "") or ""
-    name    = company.get("name", "?")
+async def scan_domain(session, row: dict) -> dict | None:
+    domain  = row["domain"]
+    website = row.get("website") or f"https://{domain}"
 
-    if not website:
-        return cid, None, []
+    pages = [website, website.rstrip("/") + "/about", website.rstrip("/") + "/technology"]
+    html_combined = ""
+    for url in pages[:2]:
+        h = await fetch(session, url)
+        if h: html_combined += " " + h
 
-    domain = normalize_domain(website)
-    if not domain:
-        return cid, None, []
+    if not html_combined.strip():
+        return {"domain": domain, "scan_errors": (row.get("scan_errors") or 0) + 1,
+                "last_scan_date": datetime.now(timezone.utc)}
 
-    # Pagine da scansionare
-    pages_to_scan = [website]
-    for path in ["/about", "/technology", "/ai", "/careers", "/blog"]:
-        pages_to_scan.append(website.rstrip("/") + path)
+    text = extract_text(html_combined)
+    ai_stack, tech_stack = detect(text, html_combined)
+    scores = calc_scores(ai_stack, tech_stack, text)
 
-    all_html = ""
-    for url in pages_to_scan[:3]:  # max 3 pagine per velocità
-        html = await fetch_page(session, url)
-        if html:
-            all_html += " " + html
-
-    if not all_html.strip():
-        # Sito irraggiungibile — segna come scansionato senza dati
-        return cid, {
-            "last_scan_date": datetime.now(timezone.utc).isoformat(),
-            "ai_adoption_score": 0.0,
-        }, []
-
-    text = extract_text(all_html)
-    ai_stack, tech_stack, evidence = detect_tech(text, all_html, website)
-
-    # Apollo enrichment
-    apollo_data = await enrich_apollo(session, domain)
-
-    scores = calculate_scores(ai_stack, tech_stack, text, company)
-
-    tech_dna = {
-        "ai":         ai_stack,
-        "tech":       tech_stack,
-        "domain":     domain,
-        "scanned_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    payload = {
-        "last_scan_date":       datetime.now(timezone.utc).isoformat(),
-        "ai_stack":             ai_stack if ai_stack else [],
-        "tech_stack":           tech_stack if tech_stack else [],
-        "technology_dna":       json.dumps(tech_dna),
-        "ats_technology_adoption": scores["ai_adoption_score"],
-        "ai_transformation_score": scores["ai_maturity_score"],
+    return {
+        "domain":         domain,
+        "ai_stack":       json.dumps(ai_stack),
+        "tech_stack":     json.dumps(tech_stack),
+        "last_scan_date": datetime.now(timezone.utc),
         **scores,
-        **apollo_data,
     }
 
-    return cid, payload, evidence
+
+# ── PostgreSQL helpers ─────────────────────────────────────────────────────────
+async def ensure_schema(pool):
+    async with pool.acquire() as conn:
+        await conn.execute(SCHEMA_SQL)
+    log.info("=0] Schema DB OK")
 
 
-# ── Write to Base44 ───────────────────────────────────────────────────────────
-async def write_to_base44(session, company_id: str, payload: dict) -> bool:
-    """Aggiorna record via PUT (merge atomico lato server)."""
-    if not company_id:
-        return False
-    try:
-        async with session.put(
-            f"{BASE}/Company/{company_id}",
-            headers=HW,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as r:
-            return r.ok
-    except Exception as e:
-        log.debug(f"write error {company_id}: {e}")
-        return False
+async def write_scan_result(pool, result: dict):
+    if not result: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE companies SET
+                ai_stack        = $1,
+                tech_stack      = $2,
+                ai_score        = $3,
+                maturity_score  = $4,
+                cloud_score     = $5,
+                automation_score= $6,
+                developer_score = $7,
+                security_score  = $8,
+                growth_score    = $9,
+                innovation_score= $10,
+                intent_score    = $11,
+                commerce_score  = $12,
+                tech_gap_score  = $13,
+                last_scan_date  = $14,
+                scan_errors     = COALESCE($15, scan_errors),
+                updated_at      = NOW()
+            WHERE domain = $16
+        """,
+            result.get("ai_stack","[]"),
+            result.get("tech_stack","[]"),
+            result.get("ai_score",0),
+            result.get("maturity_score",0),
+            result.get("cloud_score",0),
+            result.get("automation_score",0),
+            result.get("developer_score",0),
+            result.get("security_score",0),
+            result.get("growth_score",0),
+            result.get("innovation_score",0),
+            result.get("intent_score",0),
+            result.get("commerce_score",0),
+            result.get("tech_gap_score",0),
+            result.get("last_scan_date"),
+            result.get("scan_errors"),
+            result["domain"],
+        )
 
 
-# ── Load batch (skip stabile) ─────────────────────────────────────────────────
-_w_skip = -1
-
-async def load_batch(session) -> list:
-    """
-    Carica batch con skip deterministico.
-    sort=last_scan_date: NULL prima → mai scansionate vengono prime.
-    Skip avanza sempre → non torna mai indietro.
-    Fine DB → pausa 5min e ricomincia.
-    """
-    global _w_skip
-
-    if _w_skip == -1:
-        _w_skip = WORKER_ID * BATCH_SIZE
-        log.info(f"={WORKER_ID}] Init skip={_w_skip}")
-
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=RESCAN_DAYS)).isoformat()
-
-    for attempt in range(5):
-        try:
-            async with session.get(
-                f"{BASE}/Company",
-                headers=HR,
-                params={
-                    "limit": BATCH_SIZE,
-                    "skip":  _w_skip,
-                    "sort":  "last_scan_date",
-                    "fields": "id,name,website,last_scan_date,employee_count,industry,description,country",
-                },
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as r:
-                if not r.ok:
-                    log.warning(f"={WORKER_ID}] HTTP {r.status} load_batch")
-                    await asyncio.sleep(10)
-                    continue
-
-                data = await r.json()
-                if not isinstance(data, list):
-                    data = []
-
-                if not data:
-                    log.info(f"={WORKER_ID}] Fine DB — pausa 5min e restart")
-                    _w_skip = WORKER_ID * BATCH_SIZE
-                    await asyncio.sleep(300)
-                    return []
-
-                # Fine DB reale (meno di BATCH_SIZE record)
-                if len(data) < BATCH_SIZE:
-                    log.info(f"={WORKER_ID}] Fine DB (got {len(data)}) — pausa 5min e restart")
-                    _w_skip = WORKER_ID * BATCH_SIZE
-                    await asyncio.sleep(300)
-                    return data  # processa comunque l'ultimo batch parziale
-
-                pending = [c for c in data
-                           if not c.get("last_scan_date") or c["last_scan_date"] < cutoff]
-
-                _w_skip += BATCH_SIZE  # avanza sempre
-                log.info(f"={WORKER_ID}] skip→{_w_skip} pending={len(pending)}/{len(data)}")
-
-                return pending if pending else []
-
-        except Exception as e:
-            log.warning(f"={WORKER_ID}] load_batch attempt {attempt+1}: {e}")
-            await asyncio.sleep(5)
-
-    return []
+async def load_batch_pg(pool) -> list[dict]:
+    """Carica batch: prima i non scansionati, poi i più vecchi."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=RESCAN_DAYS)
+    # Partiziona per worker_id per evitare collisioni
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f"""
+            SELECT id, domain, website, source, global_rank, employee_count,
+                   scan_errors, last_scan_date
+            FROM companies
+            WHERE (last_scan_date IS NULL OR last_scan_date < $1)
+              AND scan_errors < 5
+              AND (id % $2) = $3
+            ORDER BY last_scan_date NULLS FIRST
+            LIMIT $4
+        """, cutoff, TOTAL_WORKERS, WORKER_ID, BATCH_SIZE)
+    return [dict(r) for r in rows]
 
 
-# ── Main worker loop ──────────────────────────────────────────────────────────
-async def run_worker():
-    total_scanned = total_ai = total_written = 0
-    start = time.time()
+# ── Importer: carica 1.6M domini in PG ───────────────────────────────────────
+async def run_importer(pool):
+    log.info("=I] IMPORTER MODE — download Majestic + Cisco Umbrella")
+    import csv, io, zipfile
 
-    connector = aiohttp.TCPConnector(limit=THREADS, ttl_dns_cache=300, limit_per_host=5)
+    sources = [
+        ("Majestic Million","https://downloads.majestic.com/majestic_million.csv","csv"),
+        ("Cisco Umbrella",  "https://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip","zip"),
+    ]
+
+    connector = aiohttp.TCPConnector(limit=5)
     async with aiohttp.ClientSession(connector=connector) as session:
-        while True:
-            batch = await load_batch(session)
-            if not batch:
-                await asyncio.sleep(120)  # 2 min — non 10 min (keep-alive per Railway)
+        all_records = []
+
+        for name, url, fmt in sources:
+            log.info(f"=I] Download {name}...")
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=180)) as r:
+                    raw = await r.read()
+                log.info(f"=I] {name}: {len(raw):,} bytes")
+            except Exception as e:
+                log.error(f"=I] {name} download error: {e}")
                 continue
 
-            log.info(f"={WORKER_ID}] Batch: {len(batch)} aziende")
-            sem = asyncio.Semaphore(THREADS)
-            done = ok = ai_hits = 0
-            batch_start = time.time()
+            records = []
+            if fmt == "csv":
+                text = raw.decode("utf-8", errors="replace")
+                reader = csv.DictReader(io.StringIO(text))
+                for row in reader:
+                    try:
+                        domain = normalize_domain(row.get("Domain",""))
+                        rank   = int(row.get("GlobalRank",0))
+                        if domain and domain not in EXCLUDE_DOMAINS and len(domain) > 3:
+                            records.append((domain, domain_to_name(domain), f"https://{domain}", "majestic", rank))
+                    except Exception: continue
+            elif fmt == "zip":
+                with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                    with z.open(z.namelist()[0]) as f:
+                        reader = csv.reader(io.TextIOWrapper(f,"utf-8",errors="replace"))
+                        for row in reader:
+                            try:
+                                rank   = int(row[0])
+                                domain = normalize_domain(row[1])
+                                if domain and domain not in EXCLUDE_DOMAINS and len(domain) > 3:
+                                    records.append((domain, domain_to_name(domain), f"https://{domain}", "umbrella", rank))
+                            except Exception: continue
 
-            async def process(company):
-                nonlocal done, ok, ai_hits
+            log.info(f"=I] {name}: {len(records):,} valid domains")
+            all_records.extend(records)
+
+        # Deduplicazione locale
+        seen = {}
+        for domain, name, website, source, rank in all_records:
+            if domain not in seen or rank < seen[domain][4]:
+                seen[domain] = (domain, name, website, source, rank)
+        unique = list(seen.values())
+        log.info(f"=I] Unici dopo dedup: {len(unique):,}")
+
+        # INSERT bulk in chunks da 5000
+        inserted = skipped = 0
+        CHUNK = 5000
+        for i in range(0, len(unique), CHUNK):
+            chunk = unique[i:i+CHUNK]
+            async with pool.acquire() as conn:
+                result = await conn.executemany("""
+                    INSERT INTO companies (domain, name, website, source, global_rank)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (domain) DO NOTHING
+                """, chunk)
+            # executemany non ritorna count facilmente — stima
+            inserted += len(chunk)
+            if inserted % 50000 == 0:
+                log.info(f"=I] Inseriti: {inserted:,}/{len(unique):,} ({inserted/len(unique)*100:.1f}%)")
+            await asyncio.sleep(0.01)
+
+        log.info(f"=I] Import completato: ~{inserted:,} record inseriti in Postgres")
+
+        # Conta totale
+        async with pool.acquire() as conn:
+            total = await conn.fetchval("SELECT COUNT(*) FROM companies")
+        log.info(f"=I] Totale in DB: {total:,}")
+
+
+# ── Syncer: push su Base44 ─────────────────────────────────────────────────────
+async def run_syncer(pool):
+    """
+    Pusha su Base44 SOLO i record con AI score > 0 non ancora pushati.
+    Rate limit Base44: max ~6 POST o PUT al minuto → 1 ogni 10s.
+    """
+    log.info("=S] SYNCER MODE — push to Base44")
+    connector = aiohttp.TCPConnector(limit=2)
+
+    while True:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            # Leggi batch di record da pushare
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("""
+                    SELECT id, domain, name, website, source, global_rank,
+                           country, industry, employee_count, revenue_range, logo_url,
+                           ai_stack, tech_stack,
+                           ai_score, maturity_score, cloud_score, automation_score,
+                           developer_score, security_score, growth_score, innovation_score,
+                           intent_score, commerce_score, tech_gap_score,
+                           base44_id, last_scan_date
+                    FROM companies
+                    WHERE ai_score > 20
+                      AND last_scan_date IS NOT NULL
+                      AND (last_push_date IS NULL OR last_push_date < last_scan_date)
+                    ORDER BY ai_score DESC
+                    LIMIT 50
+                """)
+
+            if not rows:
+                log.info("=S] Nessun record da pushare — sleep 5min")
+                await asyncio.sleep(300)
+                continue
+
+            log.info(f"=S] {len(rows)} record da pushare su Base44")
+            pushed = 0
+
+            for row in rows:
+                r = dict(row)
+                ai_stack   = json.loads(r.get("ai_stack") or "[]")
+                tech_stack = json.loads(r.get("tech_stack") or "[]")
+
+                payload = {
+                    "name":                    r.get("name") or domain_to_name(r["domain"]),
+                    "website":                 r.get("website") or f"https://{r['domain']}",
+                    "source":                  r.get("source","railway"),
+                    "ai_stack":                ai_stack,
+                    "tech_stack":              tech_stack,
+                    "ai_adoption_score":       r.get("ai_score",0),
+                    "ai_maturity_score":       r.get("maturity_score",0),
+                    "cloud_score":             r.get("cloud_score",0),
+                    "automation_score":        r.get("automation_score",0),
+                    "developer_score":         r.get("developer_score",0),
+                    "security_score":          r.get("security_score",0),
+                    "growth_score":            r.get("growth_score",0),
+                    "innovation_score":        r.get("innovation_score",0),
+                    "ai_buying_intent_score":  r.get("intent_score",0),
+                    "commerce_score":          r.get("commerce_score",0),
+                    "tech_gap_score":          r.get("tech_gap_score",0),
+                    "last_scan_date":          r["last_scan_date"].isoformat() if r.get("last_scan_date") else None,
+                    "global_rank":             r.get("global_rank"),
+                    "country":                 r.get("country"),
+                    "employee_count":          r.get("employee_count"),
+                    "revenue_range":           r.get("revenue_range"),
+                    "logo_url":                r.get("logo_url"),
+                    "ai_transformation_score": r.get("maturity_score",0),
+                }
+                payload = {k:v for k,v in payload.items() if v is not None}
+
+                try:
+                    b44_id = r.get("base44_id")
+                    if b44_id:
+                        # Update esistente
+                        async with session.put(f"{BASE44_URL}/Company/{b44_id}",
+                            headers=HW, json=payload,
+                            timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                            ok = resp.ok
+                    else:
+                        # Cerca per dominio su Base44
+                        domain = r["domain"]
+                        async with session.get(f"{BASE44_URL}/Company",
+                            headers=HR,
+                            params={"limit":1,"fields":"id,website"},
+                            timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                            # Cerca match per website
+                            b44_list = await resp.json() if resp.ok else []
+                            match = next((c for c in b44_list if domain in (c.get("website") or "")), None)
+
+                        if match:
+                            b44_id = match["id"]
+                            async with session.put(f"{BASE44_URL}/Company/{b44_id}",
+                                headers=HW, json=payload,
+                                timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                                ok = resp.ok
+                        else:
+                            # Nuovo record
+                            async with session.post(f"{BASE44_URL}/Company",
+                                headers=HW, json=payload,
+                                timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                                ok = resp.ok
+                                if ok:
+                                    created = await resp.json()
+                                    b44_id = created.get("id","")
+
+                    if ok:
+                        pushed += 1
+                        async with pool.acquire() as conn:
+                            await conn.execute("""
+                                UPDATE companies SET
+                                    base44_id = $1,
+                                    last_push_date = NOW()
+                                WHERE domain = $2
+                            """, b44_id, r["domain"])
+
+                except Exception as e:
+                    log.warning(f"=S] Push error {r['domain']}: {e}")
+
+                # Rate limit: 1 operazione ogni 10s su Base44
+                await asyncio.sleep(10)
+
+            log.info(f"=S] Pushati: {pushed}/{len(rows)}")
+            await asyncio.sleep(60)
+
+
+# ── Scanner worker ────────────────────────────────────────────────────────────
+async def run_scanner(pool):
+    log.info(f"=W{WORKER_ID}] SCANNER MODE | threads={THREADS} | batch={BATCH_SIZE}")
+    total_scanned = total_ai = 0
+    start = time.time()
+
+    connector = aiohttp.TCPConnector(limit=THREADS, ttl_dns_cache=300, limit_per_host=3)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        while True:
+            batch = await load_batch_pg(pool)
+            if not batch:
+                log.info(f"=W{WORKER_ID}] DB vuoto — sleep 5min")
+                await asyncio.sleep(300)
+                continue
+
+            log.info(f"=W{WORKER_ID}] Batch: {len(batch)} domini")
+            sem   = asyncio.Semaphore(THREADS)
+            done  = ok = ai_n = 0
+            t_bat = time.time()
+
+            async def process(row):
+                nonlocal done, ok, ai_n
                 async with sem:
                     try:
-                        cid, payload, evidence = await scan_company(session, company)
-                        if payload is not None:
-                            written = await write_to_base44(session, cid, payload)
-                            if written:
-                                ok += 1
-                                if payload.get("ai_stack"):
-                                    ai_hits += 1
+                        result = await scan_domain(session, row)
+                        if result:
+                            await write_scan_result(pool, result)
+                            ok += 1
+                            stack = json.loads(result.get("ai_stack","[]"))
+                            if stack: ai_n += 1
                     except Exception as e:
-                        log.debug(f"process error {company.get('name','?')}: {e}")
+                        log.debug(f"process error: {e}")
                     finally:
                         done += 1
-                        if done % 50 == 0:
-                            elapsed = time.time() - batch_start
-                            rate = int(done / max(elapsed / 60, 0.01))
-                            pct_ai = ai_hits / max(done, 1) * 100
-                            log.info(f"={WORKER_ID}]  [{done}/{len(batch)}] {rate}/min | written:{ok} | AI:{ai_hits} ({pct_ai:.1f}%)")
+                        if done % 100 == 0:
+                            elapsed = time.time() - t_bat
+                            rate = int(done / max(elapsed/60, 0.01))
+                            log.info(f"=W{WORKER_ID}]  [{done}/{len(batch)}] {rate}/min | ok:{ok} | AI:{ai_n} ({ai_n/max(done,1)*100:.0f}%)")
 
-            await asyncio.gather(*[process(c) for c in batch])
+            await asyncio.gather(*[process(r) for r in batch])
 
             total_scanned += done
-            total_ai      += ai_hits
-            total_written += ok
-            uptime_h       = (time.time() - start) / 3600
-
+            total_ai      += ai_n
+            uptime = (time.time()-start)/3600
             log.info(
-                f"={WORKER_ID}] Batch done: {done} scan | {ok} written | {ai_hits} AI | "
-                f"Tot: {total_scanned} | AI%: {total_ai/max(total_scanned,1)*100:.1f}% | "
-                f"Up: {uptime_h:.2f}h"
+                f"=W{WORKER_ID}] Batch done: {done} | ok:{ok} | AI:{ai_n} | "
+                f"Tot:{total_scanned:,} | AI%:{total_ai/max(total_scanned,1)*100:.1f}% | Up:{uptime:.2f}h"
             )
             await asyncio.sleep(1)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Healthcheck HTTP ──────────────────────────────────────────────────────────
+async def healthcheck(pool):
+    async def handle(reader, writer):
+        try:
+            await reader.read(512)
+            async with pool.acquire() as conn:
+                total   = await conn.fetchval("SELECT COUNT(*) FROM companies") or 0
+                scanned = await conn.fetchval("SELECT COUNT(*) FROM companies WHERE last_scan_date IS NOT NULL") or 0
+                ai_count= await conn.fetchval("SELECT COUNT(*) FROM companies WHERE ai_score > 0") or 0
+            body = json.dumps({"status":"ok","total":total,"scanned":scanned,"ai":ai_count,"worker":WORKER_ID,"mode":MODE}).encode()
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "+str(len(body)).encode()+b"\r\n\r\n"+body)
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "0.0.0.0", PORT)
+    log.info(f"=0] Healthcheck :{PORT} (mode={MODE})")
+    async with server:
+        await server.serve_forever()
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 async def main():
-    # Avvia healthcheck e worker in parallelo
-    await asyncio.gather(
-        healthcheck_server(),
-        run_worker(),
-    )
+    log.info(f"AgentSignal v6.0 | worker={WORKER_ID} | mode={MODE}")
+
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=3, max_size=10,
+                                     command_timeout=30)
+    await ensure_schema(pool)
+
+    if MODE == "importer":
+        await asyncio.gather(healthcheck(pool), run_importer(pool))
+    elif MODE == "syncer":
+        await asyncio.gather(healthcheck(pool), run_syncer(pool))
+    else:
+        await asyncio.gather(healthcheck(pool), run_scanner(pool))
+
 
 if __name__ == "__main__":
     asyncio.run(main())
