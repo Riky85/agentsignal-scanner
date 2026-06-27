@@ -229,6 +229,11 @@ async def sync_loop(pool):
     Nessun 'async with session' — la sessione resta aperta per sempre.
     Questo risolve il bug 'Session is closed'.
     """
+    # ── DEDUP all'avvio: elimina duplicati Base44 ───────────────────────
+    log.info("=== DEDUP START ===")
+    await run_dedup(session)
+    log.info("=== DEDUP DONE ===")
+
     log.info(f"Sync loop start | rate=1/{RATE_DELAY}s | batch={BATCH_SIZE}")
 
     # Connector con keepalive lungo
@@ -273,6 +278,94 @@ async def sync_loop(pool):
         await session.close()
         await connector.close()
 
+
+async def run_dedup(session):
+    """Elimina duplicati da Base44: tieni il record più ricco per ogni nome."""
+    from collections import defaultdict
+    import re
+    B44_HDR = {"api-key": "", "Content-Type": "application/json"}
+    B44_URL = "https://app.base44.com/api/apps/6a3a284ab0b87dfa27558bb6/entities/Company"
+
+    def norm(s): return re.sub(r"[\s\-\.]","", (s or "").strip().lower())
+    def richness(c):
+        ai = c.get("ai_stack") or []
+        if isinstance(ai, str):
+            try: ai = json.loads(ai)
+            except: ai = []
+        return (bool(c.get("description"))*10 + bool(c.get("employee_count"))*5 +
+                bool(c.get("org_chart") and c["org_chart"] not in [[],"[]",None,""])*5 +
+                bool(c.get("industry"))*3 + bool(c.get("logo_url"))*2 +
+                len(ai)*2 + float(c.get("ai_adoption_score") or 0)*0.1)
+
+    # Scarica tutti i record paginati
+    all_cos, skip = [], 0
+    while True:
+        try:
+            async with session.get(
+                f"{B44_URL}?limit=500&skip={skip}&fields=id,name,website,ai_adoption_score,description,employee_count,org_chart,industry,ai_stack,logo_url",
+                headers=B44_HDR, timeout=aiohttp.ClientTimeout(total=30), ssl=False
+            ) as r:
+                batch = await r.json(content_type=None)
+            if not batch or not isinstance(batch, list): break
+            all_cos.extend(batch)
+            if len(batch) < 500: break
+            skip += 500
+            await asyncio.sleep(0.2)
+        except Exception as e:
+            log.warning(f"Dedup fetch err: {e}")
+            break
+
+    log.info(f"  Dedup: {len(all_cos):,} record scaricati")
+    by_name = defaultdict(list)
+    for c in all_cos:
+        k = norm(c.get("name",""))
+        if k: by_name[k].append(c)
+
+    dup_groups = {k:v for k,v in by_name.items() if len(v) > 1}
+    extra = sum(len(v)-1 for v in dup_groups.values())
+    log.info(f"  Dedup: {len(dup_groups)} gruppi | {extra} record extra")
+    if not dup_groups:
+        log.info("  Dedup: nessun duplicato trovato ✓")
+        return
+
+    deleted = merged = 0
+    for records in dup_groups.values():
+        sorted_r = sorted(records, key=richness, reverse=True)
+        keeper, dupes = sorted_r[0], sorted_r[1:]
+
+        patch = {}
+        for d in dupes:
+            if not keeper.get("description") and d.get("description"): patch["description"] = d["description"]
+            if not keeper.get("employee_count") and d.get("employee_count"): patch["employee_count"] = d["employee_count"]
+            if not keeper.get("industry") and d.get("industry"): patch["industry"] = d["industry"]
+            if not keeper.get("logo_url") and d.get("logo_url"): patch["logo_url"] = d["logo_url"]
+            d_ai = d.get("ai_stack") or []; k_ai = keeper.get("ai_stack") or []
+            if isinstance(d_ai,str):
+                try: d_ai=json.loads(d_ai)
+                except: d_ai=[]
+            if isinstance(k_ai,str):
+                try: k_ai=json.loads(k_ai)
+                except: k_ai=[]
+            if len(d_ai) > len(k_ai):
+                patch["ai_stack"] = d_ai
+                patch["ai_adoption_score"] = float(d.get("ai_adoption_score") or 0)
+
+        if patch:
+            try:
+                async with session.put(f"{B44_URL}/{keeper['id']}", headers=B44_HDR,
+                    json=patch, timeout=aiohttp.ClientTimeout(total=12), ssl=False) as r:
+                    if r.status == 200: merged += 1
+            except: pass
+
+        for d in dupes:
+            try:
+                async with session.delete(f"{B44_URL}/{d['id']}", headers=B44_HDR,
+                    timeout=aiohttp.ClientTimeout(total=8), ssl=False) as r:
+                    if r.status in (200,204): deleted += 1
+            except: pass
+            await asyncio.sleep(0.05)
+
+    log.info(f"  Dedup: eliminati={deleted} merged={merged} ✓")
 
 async def main():
     log.info("=== AgentSignal Syncer v2 — Railway -> Base44 ===")
