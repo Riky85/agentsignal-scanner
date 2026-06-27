@@ -447,96 +447,76 @@ async def write_to_base44(session, cid, payload, retries=3):
 # Stato di avanzamento per ogni worker (persistente nel processo)
 # Cursore globale: ogni worker inizia nella sua zona e avanza in step di TOTAL_WORKERS batch
 # ── Stato globale worker ────────────────────────────────────────────────────
-_queue: list = []       # coda locale di aziende da scansionare
-_queue_loaded = False   # True dopo _build_queue completato
-
-async def _build_queue(session):
-    """
-    Costruisce UNA VOLTA la coda stabile degli ID da scansionare.
-
-    Usa sort=id (STABILE) invece di sort=last_scan_date che cambia durante
-    la scansione causando skip drift e salti indietro.
-
-    Distribuzione interleaved tra worker:
-      W0 -> items[0], items[3], items[6], ...
-      W1 -> items[1], items[4], items[7], ...
-      W2 -> items[2], items[5], items[8], ...
-    """
-    global _queue, _queue_loaded
-    if _queue_loaded:
-        return
-
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=RESCAN_DAYS)).isoformat()
-    log.info(f"[W{WORKER_ID}] Building stable queue (cutoff={cutoff[:10]}, rescan={RESCAN_DAYS}d)...")
-
-    all_pending = []
-    skip = 0
-    page = 0
-
-    while True:
-        for attempt in range(5):
-            try:
-                async with session.get(
-                    f"{BASE}/Company", headers=HR,
-                    params={
-                        "limit": 500,
-                        "skip": skip,
-                        "sort": "id",
-                        "fields": "id,name,website,last_scan_date,employee_count,industry,description,country",
-                    },
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as r:
-                    if r.ok:
-                        data = await r.json()
-                        if not isinstance(data, list):
-                            data = []
-                        pending = [
-                            c for c in data
-                            if not c.get("last_scan_date") or c["last_scan_date"] < cutoff
-                        ]
-                        all_pending.extend(pending)
-                        page += 1
-                        if page % 20 == 0:
-                            log.info(f"[W{WORKER_ID}] Queue build: {len(all_pending)} pending | page {page}")
-                        if len(data) < 500:
-                            skip = -1
-                        else:
-                            skip += 500
-                        break
-                    else:
-                        log.warning(f"[W{WORKER_ID}] HTTP {r.status} during queue build")
-                        await asyncio.sleep(5)
-            except Exception as e:
-                log.warning(f"[W{WORKER_ID}] queue build attempt {attempt+1}: {e}")
-                await asyncio.sleep(5)
-
-        if skip == -1:
-            break
-
-    my_items = all_pending[WORKER_ID::TOTAL_WORKERS]
-    _queue = my_items
-    _queue_loaded = True
-    log.info(
-        f"[W{WORKER_ID}] Queue ready: {len(_queue)} items "
-        f"(total_pending={len(all_pending)}, workers={TOTAL_WORKERS})"
-    )
-
+# ── Cursore per-worker ───────────────────────────────────────────────────────
+# Ogni worker parte da skip=worker_id*BATCH e avanza di BATCH a ogni step.
+# Non serve nessun warm-up: il primo batch arriva entro 2 secondi dal boot.
+_w_skip = -1
 
 async def load_batch(session):
-    """Estrae il prossimo batch dalla coda locale. Ricostruisce se esaurita."""
-    global _queue, _queue_loaded
+    """
+    Batch loader senza warm-up.
 
-    if not _queue_loaded or not _queue:
-        await _build_queue(session)
-        if not _queue:
-            _queue_loaded = False
-            log.info(f"[W{WORKER_ID}] Queue empty -- next rebuild in 5min")
-            return []
+    - sort=last_scan_date: NULL (mai scansionate) vengono prima,
+      poi le più vecchie. Ordinamento stabile: i worker avanzano sempre
+      in avanti quindi non c'e' drift anche se last_scan_date cambia.
+    - Worker 0 -> skip 0, 300, 600, ...
+      Worker 1 -> skip 300, 600, 900, ...  (parte da posizione diversa)
+      Worker 2 -> skip 600, 900, 1200, ...
+      (overlap intenzionale: copre tutto il DB, la deduplicazione e'
+       garantita dal fatto che ogni azienda aggiornata esce dalla zona NULL)
+    - Fine DB reale (len<BATCH): pausa 30min, poi riparte da skip iniziale.
+    """
+    global _w_skip
 
-    batch = _queue[:BATCH_SIZE]
-    _queue = _queue[BATCH_SIZE:]
-    log.info(f"[W{WORKER_ID}] Batch {len(batch)} | queue remaining: {len(_queue)}")
-    return batch
+    if _w_skip == -1:
+        _w_skip = WORKER_ID * BATCH_SIZE
+        log.info(f"[W{WORKER_ID}] Init skip={_w_skip}")
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=RESCAN_DAYS)).isoformat()
+
+    for attempt in range(5):
+        try:
+            async with session.get(f"{BASE}/Company", headers=HR,
+                params={
+                    "limit": BATCH_SIZE,
+                    "skip":  _w_skip,
+                    "sort":  "last_scan_date",
+                    "fields": "id,name,website,last_scan_date,employee_count,industry,description,country",
+                },
+                timeout=aiohttp.ClientTimeout(total=30)) as r:
+
+                if not r.ok:
+                    log.warning(f"[W{WORKER_ID}] HTTP {r.status} skip={_w_skip}")
+                    await asyncio.sleep(10)
+                    continue
+
+                data = await r.json()
+                if not isinstance(data, list): data = []
+
+                # Fine DB reale
+                if len(data) < BATCH_SIZE:
+                    log.info(f"[W{WORKER_ID}] Fine DB skip={_w_skip} (got {len(data)}) — pausa 30min")
+                    _w_skip = WORKER_ID * BATCH_SIZE
+                    await asyncio.sleep(1800)
+                    return []
+
+                # Filtra aziende gia' scansionate di recente
+                pending = [c for c in data
+                           if not c.get("last_scan_date") or c["last_scan_date"] < cutoff]
+
+                # Avanza SEMPRE (non tornare mai indietro)
+                _w_skip += BATCH_SIZE
+                log.info(f"[W{WORKER_ID}] skip->{_w_skip} | pending={len(pending)}/{len(data)}")
+
+                if pending:
+                    return pending
+                # batch tutto fresco: ritorna [] e run_worker attende 2s poi richiama
+                return []
+
+        except Exception as e:
+            log.warning(f"[W{WORKER_ID}] load_batch attempt {attempt+1}: {e}")
+            await asyncio.sleep(5)
+    return []
 
 
 async def run_worker():
