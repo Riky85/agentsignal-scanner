@@ -408,42 +408,123 @@ async def fetch(session, url: str, timeout: int = 12) -> str:
     return ""
 
 
+# ── Web Scanner — strategia multi-sorgente ────────────────────────────────────
+# REALTÀ: L'AI stack NON appare mai nei JS bundle frontend dei siti enterprise.
+# Vive nel backend (Python/Node server-side).
+# DOVE trovarlo davvero:
+#   1. Bundle JS (per app che usano AI widget/chat nel browser — raro ma reale)
+#   2. Pagine /about, /technology, /careers/jobs (hiring signals tecnici)
+#   3. HTTP headers (x-powered-by, server) e meta tag
+#   4. package.json se esposto pubblicamente (/package.json)
+# TECH STACK: rilevabile al 100% da homepage (CDN fingerprint, script src, cookie names)
+
 async def fetch_js_bundles(session, html: str, base_url: str) -> list:
+    """
+    Scarica bundle JS in parallelo. Tutti i bundle senza filtro nome
+    (i nomi hash non danno info — scarichiamo e cerchiamo nel contenuto).
+    Skip solo: analytics/ads/font/polyfill.
+    """
     SKIP = re.compile(
-        r'analytics|gtm|gtag|fbq|facebook|pixel|hotjar|clarity|'
-        r'font|icon|emoji|polyfill|recaptcha|turnstile|cookie|consent|'
-        r'adsbygoogle|adsense|chartbeat|comscore', re.IGNORECASE)
-    PRIO = re.compile(
-        r'vendor|framework|main|app|runtime|chunk|index|bundle|'
-        r'openai|anthropic|langchain|ai-sdk|llm|model|embed|inference', re.IGNORECASE)
+        r'analytics|gtm|gtag|fbq|pixel|hotjar|clarity|mouseflow|'
+        r'fonts?\.google|typekit|adobe|font|icon|emoji|polyfill|'
+        r'recaptcha|turnstile|cookie-?consent|gdpr|adsbygoogle',
+        re.IGNORECASE
+    )
     try:
-        base = urlparse(base_url)
-        origin = f"{base.scheme}://{base.netloc}"
+        p = urlparse(base_url)
+        origin = f"{p.scheme}://{p.netloc}"
     except Exception:
         return []
+
     js_urls, seen = [], set()
     for m in re.finditer(
-        r'<script[^>]+src=["\']((https?://|/)[^"\']+\.js(?:[?#][^"\']*)?)["\']',
+        r'<script[^>]+src=["\']([^"\']+\.js(?:[^"\']*)?)["\']',
         html, re.IGNORECASE
     ):
-        url = m.group(1)
-        if not url.startswith("http"): url = origin + url
-        if url not in seen:
-            seen.add(url)
-            js_urls.append(url)
-    priority = [u for u in js_urls if PRIO.search(u) and not SKIP.search(u)]
-    others   = [u for u in js_urls if u not in priority and not SKIP.search(u)]
-    bundles  = []
-    for url in (priority + others)[:6]:
-        if len(bundles) >= 3: break
-        content = await fetch(session, url, timeout=8)
-        if content: bundles.append(content[:50000])
+        raw = m.group(1)
+        full = raw if raw.startswith("http") else origin + raw
+        base_full = full.split("?")[0]
+        if base_full not in seen and not SKIP.search(full):
+            seen.add(base_full)
+            js_urls.append(full)
+
+    # Scarica fino a 8 bundle in parallelo
+    async def get_bundle(url):
+        return await fetch(session, url, timeout=7)
+
+    tasks = [get_bundle(u) for u in js_urls[:10]]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    bundles = [r for r in results if isinstance(r, str) and r][:8]
     return bundles
+
+
+async def fetch_extra_pages(session, base_url: str) -> str:
+    """
+    Scarica SOLO pagine hiring (/careers, /jobs) per trovare segnali AI tecnici
+    nelle offerte di lavoro. NON include /technology o /about perché
+    queste pagine su siti di news contengono articoli su AI che generano falsi positivi.
+    """
+    p = urlparse(base_url)
+    origin = f"{p.scheme}://{p.netloc}"
+    pages = [
+        f"{origin}/careers",
+        f"{origin}/jobs",
+        f"{origin}/open-roles",
+        f"{origin}/work-with-us",
+        f"{origin}/package.json",   # esposto su alcune startup
+    ]
+    tasks = [fetch(session, url, timeout=6) for url in pages]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    texts = []
+    for r in results:
+        if isinstance(r, str) and r:
+            # Prendi solo i job listing — cerca sezioni con parole chiave hiring
+            if re.search(r'(?:job|career|engineer|developer|position|role|opening)', r, re.I):
+                texts.append(r[:30000])
+    return " ".join(texts)
+
+
+# Pattern AI per hiring pages — obbligatoriamente in contesto tecnico/lavorativo.
+# "\bOpenAI API\b" è inequivocabile (nome tool specifico, non "OpenAI" da solo).
+# "\bLLM\b" non è incluso da solo perché appare in news/blog — lo cerchiamo
+# solo quando accompagnato da contesto hiring ("engineer", "experience with").
+AI_JOBS_PATTERNS = [
+    # Tool specifici — inequivocabili anche fuori contesto
+    ("LangChain",        r"\bLangChain\b"),
+    ("LlamaIndex",       r"\bLlamaIndex\b|\bllama[_-]index\b"),
+    ("AWS Bedrock",      r"\bAWS\s+Bedrock\b"),
+    ("Azure OpenAI",     r"\bAzure\s+OpenAI\b"),
+    ("Hugging Face",     r"\bHuggingFace\b|\bHugging\s+Face\s+(?:Hub|Transformers|Inference)"),
+    ("Pinecone",         r"\bPinecone\b"),
+    ("Weaviate",         r"\bWeaviate\b"),
+    ("Qdrant",           r"\bQdrant\b"),
+    ("Ollama",           r"\bOllama\b"),
+    ("MLflow",           r"\bMLflow\b"),
+    ("Kubeflow",         r"\bKubeflow\b"),
+    ("Ray",              r"\bRay\s+Serve\b|\bAnyscale\b"),
+    # API con contesto tecnico richiesto (non "We use OpenAI" ma "OpenAI API experience")
+    ("OpenAI API",       r"(?:experience|proficiency|knowledge|working)\s+(?:with\s+)?(?:the\s+)?OpenAI\s+API"
+                         r"|OpenAI\s+API\s+(?:integration|experience|key)"),
+    ("Anthropic Claude", r"(?:experience|proficiency)\s+(?:with\s+)?Anthropic"
+                         r"|Claude\s+API"),
+    # RAG/vector solo in contesto engineering
+    ("RAG",              r"(?:build|implement|experience\s+with)\s+RAG"
+                         r"|\bRetrieval.Augmented\s+Generation\b"),
+    ("Vector DB",        r"(?:experience|working)\s+with\s+(?:a\s+)?vector\s+(?:database|store)"
+                         r"|\bvectordb\b"),
+    # Fine-tuning/MLOps solo in contesto ingegneristico
+    ("Fine-tuning",      r"(?:fine.tun(?:ing|ed?)\s+(?:LLMs?|models?|transformers?)"
+                         r"|experience\s+(?:with\s+)?fine.tuning)"),
+    ("PyTorch",          r"\bPyTorch\b"),
+    ("TensorFlow",       r"\bTensorFlow\b"),
+]
 
 
 async def scan_domain(session, row: dict) -> dict | None:
     domain  = row["domain"]
     website = row.get("website") or f"https://{domain}"
+
+    # 1. Homepage
     html = await fetch(session, website)
     if not html:
         html = await fetch(session, website.rstrip("/") + "/")
@@ -451,14 +532,33 @@ async def scan_domain(session, row: dict) -> dict | None:
         return {"domain": domain,
                 "scan_errors": (row.get("scan_errors") or 0) + 1,
                 "last_scan_date": datetime.now(timezone.utc)}
-    js_bundles = await fetch_js_bundles(session, html, website)
-    ai_stack, tech_stack = detect(html, js_bundles)
+
+    # 2. Bundle JS + extra pages in parallelo
+    js_bundles, extra_text = await asyncio.gather(
+        fetch_js_bundles(session, html, website),
+        fetch_extra_pages(session, website),
+    )
+
+    # 3. AI da codice (bundle JS + script inline + CDN URLs)
+    ai_from_code, tech_stack = detect(html, js_bundles)
+
+    # 4. AI da hiring pages (pattern contestuali)
+    ai_from_jobs = []
+    if extra_text:
+        for name, pat in AI_JOBS_PATTERNS:
+            if re.search(pat, extra_text, re.IGNORECASE) and name not in ai_from_jobs:
+                ai_from_jobs.append(name)
+
+    # Merge: codice prima (certezza), poi hiring (segnale)
+    ai_stack = list(dict.fromkeys(ai_from_code + [t for t in ai_from_jobs if t not in ai_from_code]))
+
     text = extract_text(html)
     scores = calc_scores(ai_stack, tech_stack, text)
+
     return {
-        "domain": domain,
-        "ai_stack": json.dumps(ai_stack),
-        "tech_stack": json.dumps(tech_stack),
+        "domain":         domain,
+        "ai_stack":       json.dumps(ai_stack),
+        "tech_stack":     json.dumps(tech_stack),
         "last_scan_date": datetime.now(timezone.utc),
         **scores,
     }
