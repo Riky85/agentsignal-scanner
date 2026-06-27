@@ -273,6 +273,15 @@ async def main():
 
 
 if __name__ == "__main__":
+    # Dedup prioritario se richiesto
+    if os.environ.get("DEDUP_NOW","0") == "1":
+        import importlib.util, sys
+        log.info("=== DEDUP_NOW=1 → avvio dedup Base44 ===")
+        spec = importlib.util.spec_from_file_location("dedup_b44","./dedup_b44.py")
+        mod  = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        asyncio.run(mod.main())
+        sys.exit(0)
     mode = os.environ.get("MODE","syncer")
     if mode == "enricher":
         import importlib.util, sys
