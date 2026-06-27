@@ -1083,8 +1083,10 @@ async def run_scanner(pool):
                         if result:
                             await write_scan_result(pool, result)
                             ok += 1
-                            stack = json.loads(result.get("ai_stack","[]"))
-                            if stack: ai_n += 1
+                            ai_stack  = json.loads(result.get("ai_stack","[]"))
+                            biz_stack = json.loads(result.get("biz_stack","{}"))
+                            if ai_stack:  ai_n  += 1
+                            if biz_stack: biz_n += 1
                     except Exception as e:
                         log.debug(f"process error: {e}")
                     finally:
@@ -1100,7 +1102,7 @@ async def run_scanner(pool):
             total_ai      += ai_n
             uptime = (time.time()-start)/3600
             log.info(
-                f"=W{WORKER_ID}] Batch done: {done} | ok:{ok} | AI:{ai_n} | "
+                f"=W{WORKER_ID}] Batch done: {done} | ok:{ok} | AI:{ai_n} | Biz:{biz_n} | "
                 f"Tot:{total_scanned:,} | AI%:{total_ai/max(total_scanned,1)*100:.1f}% | Up:{uptime:.2f}h"
             )
             await asyncio.sleep(1)
