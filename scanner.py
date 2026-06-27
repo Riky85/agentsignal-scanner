@@ -112,71 +112,103 @@ PRODUCTIVITY_BLACKLIST = {
 # Pattern L2: nome package npm/pip, import path, CDN SDK
 # Nessun pattern che matcha testo libero (titoli, news, blog, descrizioni prodotto)
 
+# ── AI Detection Signatures ────────────────────────────────────────────────────
+# REGOLA: solo segnali tecnici da codice — endpoint API, SDK, package, global var.
+# L1 = endpoint API diretto nel codice (certezza massima)
+# L2 = nome package npm/pip, import path, CDN URL con versione, global var JS
+# L3/L4 ELIMINATI — menzioni testuali, articoli, blog, UI copy = falsi positivi
+
 AI_SIGNATURES = [
-    # ── Tier 1: endpoint API — solo chiamate dirette al provider ──────────────
-    ("OpenAI",        [r"api\.openai\.com", r"OPENAI_API_KEY\s*=", r'"sk-[a-zA-Z0-9\-_]{20,}"'], 1, 40),
-    ("Anthropic",     [r"api\.anthropic\.com", r"ANTHROPIC_API_KEY\s*=", r'"sk-ant-[a-zA-Z0-9\-_]{10,}"'], 1, 40),
+    # ── L1: endpoint API diretti ──────────────────────────────────────────────
+    ("OpenAI",        [r"api\.openai\.com", r"OPENAI_API_KEY\s*[=:]", r"sk-[a-zA-Z0-9\-_]{32,}"], 1, 40),
+    ("Anthropic",     [r"api\.anthropic\.com", r"ANTHROPIC_API_KEY\s*[=:]", r"sk-ant-[a-zA-Z0-9\-_]{10,}"], 1, 40),
     ("Google AI",     [r"generativelanguage\.googleapis\.com", r"aiplatform\.googleapis\.com", r"vertexai\.preview"], 1, 38),
-    ("Azure OpenAI",  [r"openai\.azure\.com/openai/deployments", r"\.openai\.azure\.com"], 1, 38),
+    ("Azure OpenAI",  [r"openai\.azure\.com/openai/deployments"], 1, 38),
     ("AWS Bedrock",   [r"bedrock-runtime\.amazonaws\.com", r"bedrock\.amazonaws\.com/model/"], 1, 38),
     ("Cohere",        [r"api\.cohere\.ai/v", r"api\.cohere\.com/v"], 1, 35),
     ("Mistral",       [r"api\.mistral\.ai/v"], 1, 35),
     ("Groq",          [r"api\.groq\.com/openai/v1"], 1, 35),
-    ("Perplexity",    [r"api\.perplexity\.ai/chat/completions"], 1, 33),
-    ("Together AI",   [r"api\.together\.xyz/v1/completions", r"api\.together\.ai/v1"], 1, 33),
+    ("Perplexity",    [r"api\.perplexity\.ai/chat"], 1, 33),
+    ("Together AI",   [r"api\.together\.xyz/v1", r"api\.together\.ai/v1"], 1, 33),
     ("Replicate",     [r"api\.replicate\.com/v1/predictions"], 1, 33),
     ("xAI Grok",      [r"api\.x\.ai/v1/chat", r"api\.x\.ai/v1/completions"], 1, 33),
     ("Fireworks AI",  [r"api\.fireworks\.ai/inference/v1"], 1, 32),
     ("Deepseek",      [r"api\.deepseek\.com/v1"], 1, 32),
-    ("ElevenLabs",    [r"api\.elevenlabs\.io/v1"], 1, 30),
+    ("ElevenLabs",    [r"api\.elevenlabs\.io/v1/text-to-speech"], 1, 30),
     ("Stability AI",  [r"api\.stability\.ai/v1/generation"], 1, 30),
 
-    # ── Tier 2: SDK / package inequivocabile ──────────────────────────────────
-    # Solo import/require esatti o CDN path — non nomi generici
-    ("LangChain",     [r"from langchain[_\-\.]", r"require\(['\"]langchain", r"langchain-core@", r"@langchain/core"], 2, 25),
-    ("LlamaIndex",    [r"from llama_index\.", r"llama-index==", r"llama_index\.core"], 2, 25),
-    ("Hugging Face",  [r"from transformers import", r"huggingface\.co/models/", r"pipeline\(['\"]text-generation"], 2, 22),
-    ("Pinecone",      [r"pinecone\.init\(", r"from pinecone import", r"pinecone-client==", r"@pinecone-database/pinecone"], 2, 22),
-    ("Weaviate",      [r"weaviate\.connect_to", r"import weaviate$", r"weaviate-client=="], 2, 20),
-    ("Qdrant",        [r"QdrantClient\(", r"qdrant-client==", r"from qdrant_client import"], 2, 20),
-    ("Chroma",        [r"chromadb\.Client\(", r"import chromadb$", r"chromadb=="], 2, 18),
-    ("PyTorch",       [r"import torch\b", r"torch\.nn\.Module", r"torch==\d"], 2, 15),
-    ("TensorFlow",    [r"import tensorflow as tf", r"tensorflow==\d", r"tf\.keras\."], 2, 15),
-    ("Ollama",        [r"ollama\.chat\(", r"ollama\.generate\(", r"from ollama import"], 2, 20),
-    ("Vercel AI SDK", [r"from ['\"]@vercel/ai['\"]", r"require\(['\"]@vercel/ai['\"]", r"ai@\d+\.\d+\.\d+"], 2, 18),
-    ("OpenAI SDK",    [r"from openai import", r"require\(['\"]openai['\"]", r"openai==\d"], 2, 20),
-    ("Anthropic SDK", [r"from anthropic import", r"require\(['\"]@anthropic-ai/sdk['\"]"], 2, 20),
-    ("Langfuse",      [r"from langfuse import", r"langfuse\.com/api", r"langfuse==\d"], 2, 12),
-    ("LiteLLM",       [r"import litellm\b", r"litellm\.completion\("], 2, 15),
-    ("Haystack",      [r"from haystack import", r"haystack==\d"], 2, 15),
-    ("AutoGen",       [r"from autogen import", r"autogen==\d", r"microsoft/autogen"], 2, 15),
-    ("CrewAI",        [r"from crewai import", r"crewai==\d"], 2, 15),
+    # ── L2: SDK / package / global var / CDN chunk ────────────────────────────
+    # Matchano nomi package npm/pip, import path esatti, CDN URL con versione,
+    # variabili globali JS — NON testo libero della pagina.
+    ("OpenAI SDK",       [r"['\"]openai['\"]:", r"/openai@\d", r"from ['\"]openai['\"]",
+                          r"require\(['\"]openai['\"]", r"window\.__OPENAI_KEY"], 2, 30),
+    ("Anthropic SDK",    [r"['\"]@anthropic-ai/sdk['\"]", r"/anthropic@\d",
+                          r"require\(['\"]@anthropic-ai", r"from ['\"]@anthropic-ai"], 2, 30),
+    ("LangChain",        [r"['\"]langchain['\"]:", r"/langchain@\d", r"/langchain-core@\d",
+                          r"from ['\"]langchain", r"['\"]@langchain/core['\"]",
+                          r"require\(['\"]langchain"], 2, 25),
+    ("LlamaIndex",       [r"['\"]llama-index['\"]:", r"llama_index\.core",
+                          r"from llama_index\.", r"['\"]llama-index-core['\"]"], 2, 25),
+    ("Vercel AI SDK",    [r"['\"]@vercel/ai['\"]", r"/ai@\d+\.\d",
+                          r"from ['\"]@vercel/ai['\"]", r"require\(['\"]@vercel/ai"], 2, 22),
+    ("Hugging Face",     [r"huggingface\.co/models/[a-zA-Z0-9\-]+/[a-zA-Z0-9\-]+",
+                          r"from transformers import", r"['\"]@huggingface/inference['\"]",
+                          r"InferenceClient\("], 2, 22),
+    ("Pinecone",         [r"['\"]@pinecone-database/pinecone['\"]", r"/pinecone@\d",
+                          r"pinecone\.init\(", r"new Pinecone\("], 2, 22),
+    ("Weaviate",         [r"weaviate\.connect_to", r"['\"]weaviate-client['\"]:",
+                          r"WeaviateClient\("], 2, 20),
+    ("Qdrant",           [r"QdrantClient\(", r"['\"]qdrant-client['\"]:",
+                          r"from qdrant_client import"], 2, 20),
+    ("Chroma",           [r"chromadb\.Client\(", r"['\"]chromadb['\"]:",
+                          r"new ChromaClient"], 2, 18),
+    ("Ollama",           [r"ollama\.chat\(", r"ollama\.generate\(",
+                          r"['\"]ollama['\"]:", r"from ollama import"], 2, 20),
+    ("LiteLLM",          [r"['\"]litellm['\"]:", r"litellm\.completion\(",
+                          r"import litellm\b"], 2, 18),
+    ("Haystack",         [r"['\"]haystack-ai['\"]:", r"from haystack import Pipeline"], 2, 15),
+    ("AutoGen",          [r"['\"]pyautogen['\"]:", r"from autogen import",
+                          r"microsoft/autogen"], 2, 15),
+    ("CrewAI",           [r"['\"]crewai['\"]:", r"from crewai import Agent"], 2, 15),
+    ("PyTorch",          [r"import torch\b", r"torch\.nn\.Module",
+                          r"['\"]@pytorch/tfjs['\"]", r"['\"]torch['\"]:\s"], 2, 15),
+    ("TensorFlow",       [r"import tensorflow as tf", r"['\"]@tensorflow/tfjs['\"]",
+                          r"cdn\.jsdelivr\.net/npm/@tensorflow/tfjs"], 2, 15),
+    ("Langfuse",         [r"langfuse\.com/api", r"['\"]langfuse['\"]:",
+                          r"from langfuse import"], 2, 12),
+    ("OpenAI Assistants",[r"openai\.beta\.assistants", r"openai\.beta\.threads"], 2, 25),
 ]
 
-# ── Tech stack: solo CDN/SDK path inequivocabili ───────────────────────────────
 TECH_SIGNATURES = [
-    ("React",     [r"react\.js", r"reactjs", r"_react", r"__REACT"]),
-    ("Next.js",   [r"next\.js", r"_next/static", r"__NEXT_DATA__"]),
-    ("Vue",       [r"vue\.js", r"vuejs", r"__vue"]),
-    ("Angular",   [r"angular\.js", r"angularjs", r"ng-version"]),
-    ("Vercel",    [r"vercel\.app", r"vercel\.com", r"_vercel"]),
-    ("Netlify",   [r"netlify\.app", r"netlify\.com"]),
-    ("Cloudflare",[r"cloudflare\.com", r"cf-ray", r"__cf_bm"]),
-    ("AWS",       [r"amazonaws\.com", r"cloudfront\.net"]),
-    ("GCP",       [r"googleapis\.com", r"googlecloud\.com"]),
-    ("Azure",     [r"azure\.com", r"azurewebsites\.net"]),
-    ("Shopify",   [r"shopify\.com", r"cdn\.shopify\.com", r"myshopify"]),
-    ("Stripe",    [r"stripe\.com", r"js\.stripe\.com"]),
-    ("HubSpot",   [r"hubspot\.com", r"hs-scripts"]),
-    ("Intercom",  [r"intercom\.io", r"widget\.intercom\.io"]),
-    ("Mixpanel",  [r"mixpanel\.com"]),
-    ("Amplitude", [r"amplitude\.com"]),
-    ("Sentry",    [r"sentry\.io", r"browser\.sentry-cdn"]),
-    ("Datadog",   [r"datadoghq\.com"]),
-    ("Webflow",   [r"webflow\.com", r"webflow\.io"]),
-    ("WordPress", [r"wp-content", r"wp-includes", r"wordpress"]),
-    ("Docker",    [r"docker\.com", r"dockerfile"]),
-    ("Kubernetes",[r"kubernetes\.io", r"k8s\."]),
+    ("React",      [r"react\.development\.js", r"react\.production\.min\.js",
+                    r"/react@\d", r"__reactFiber", r"data-reactroot"]),
+    ("Next.js",    [r"/_next/static/", r"__NEXT_DATA__", r"/next@\d", r"next\.config\."]),
+    ("Vue",        [r"vue\.global\.prod\.js", r"/vue@\d", r"__vue_app__", r"data-v-app"]),
+    ("Angular",    [r"ng-version=", r"/zone\.js@\d"]),
+    ("Nuxt",       [r"__NUXT_DATA__", r"/_nuxt/", r"/nuxt@\d"]),
+    ("Svelte",     [r"/svelte@\d", r"__svelte"]),
+    ("Remix",      [r"__remixContext", r"/build/root-\w+\.js"]),
+    ("Vercel",     [r"\.vercel\.app/", r"/_vercel/", r"x-vercel-id"]),
+    ("Netlify",    [r"\.netlify\.app/", r"netlify-identity-widget"]),
+    ("Cloudflare", [r"cdnjs\.cloudflare\.com", r"__cf_bm=", r"cf-ray:"]),
+    ("AWS",        [r"\.amazonaws\.com/", r"cloudfront\.net/"]),
+    ("GCP",        [r"\.googleapis\.com/", r"\.googlecloud\.com/"]),
+    ("Azure",      [r"\.azure\.com/", r"\.azurewebsites\.net/"]),
+    ("Shopify",    [r"cdn\.shopify\.com/s/", r"myshopify\.com", r"Shopify\.theme"]),
+    ("Stripe",     [r"js\.stripe\.com/v\d", r"Stripe\('[a-zA-Z0-9_]{10,}'"]),
+    ("HubSpot",    [r"js\.hs-scripts\.com/", r"hs-analytics\.net"]),
+    ("Intercom",   [r"widget\.intercom\.io/widget/", r"app\.intercom\.io/embed"]),
+    ("Mixpanel",   [r"cdn\.mxpnl\.com/", r"cdn4\.mxpnl\.com/"]),
+    ("Amplitude",  [r"cdn\.amplitude\.com/libs/"]),
+    ("Sentry",     [r"browser\.sentry-cdn\.com/", r"@sentry/browser@\d"]),
+    ("Datadog",    [r"datadoghq-browser-agent\.com/", r"datadoghq\.com/browser-sdk"]),
+    ("Webflow",    [r"\.webflow\.io/", r"assets\.website-files\.com"]),
+    ("WordPress",  [r"/wp-content/themes/", r"/wp-includes/js/wp-embed", r"wp-json/wp/v2"]),
+    ("Segment",    [r"cdn\.segment\.com/analytics\.js"]),
+    ("PostHog",    [r"app\.posthog\.com/static/", r"eu\.posthog\.com/static/"]),
+    ("Supabase",   [r"supabase\.co/rest/v1", r"['\"]@supabase/supabase-js['\"]"]),
+    ("Firebase",   [r"firebase\.googleapis\.com", r"firebaseapp\.com"]),
+    ("Tailwind",   [r"cdn\.tailwindcss\.com", r"tailwindcss@\d"]),
 ]
 
 EXCLUDE_DOMAINS = {
@@ -217,36 +249,41 @@ def extract_text(html: str) -> str:
 
 
 
-def detect(text: str, html: str) -> tuple[list, list]:
+
+def detect(html: str, js_bundles: list) -> tuple:
     """
-    Detection STRICT: accetta SOLO pattern tecnici L1 (endpoint API) e L2 (SDK/package).
-    L3/L4 rimossi — eliminano i falsi positivi da articoli, blog, UI copy, news sites.
-    Il pattern viene cercato nell'HTML grezzo (codice JS, tag script, meta, headers CDN)
-    NON nel testo visibile estratto dalla pagina.
+    Detection STRICT — solo segnali tecnici da codice sorgente.
+    Analizza: script inline, CDN src/href, JSON embedded, JS bundle scaricati.
+    NON analizza il testo visibile della pagina.
     """
-    # Cerca nei tag script e negli URL CDN — NON nel testo visibile
-    # Estrai solo: script src, inline JS, meta http-equiv, link href, commenti HTML
     code_sections = []
 
-    # Script inline
+    # 1. Script inline
     for m in re.finditer(r'<script[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE):
         code_sections.append(m.group(1))
 
-    # Script src / link href / img src (CDN fingerprint)
-    for m in re.finditer(r'(?:src|href|action|data-src)\s*=\s*["\']([^"\']{4,})["\']', html, re.IGNORECASE):
+    # 2. URL CDN nei tag HTML
+    for m in re.finditer(r'(?:src|href|data-src)\s*=\s*["\']([^"\']{4,})["\']', html, re.IGNORECASE):
         code_sections.append(m.group(1))
 
-    # JSON embedded (__NEXT_DATA__, __NUXT_DATA__, ecc.)
-    for m in re.finditer(r'(?:__NEXT_DATA__|__NUXT__|__remixContext)\s*=\s*({.*?})\s*[;<]', html, re.DOTALL):
-        code_sections.append(m.group(1))
+    # 3. JSON embedded (SPA data injection — __NEXT_DATA__, __NUXT__, __remixContext)
+    for m in re.finditer(r'(?:__NEXT_DATA__|__NUXT_DATA__|__NUXT__|__remixContext|__APP_STATE__)\s*=\s*(\{.{10,}?\})\s*[;<]',
+                          html, re.DOTALL):
+        code_sections.append(m.group(1)[:8000])
 
-    # HTTP response headers riflessi nel DOM (x-powered-by, cf-ray, ecc.)
-    code_combined = " ".join(code_sections).lower()
+    # 4. Vite/webpack manifest
+    for m in re.finditer(r'window\.__MANIFEST__\s*=\s*(\{.*?\})', html, re.DOTALL):
+        code_sections.append(m.group(1)[:4000])
 
+    # 5. JS bundle scaricati
+    for bundle in js_bundles:
+        code_sections.append(bundle[:30000])
+
+    code_combined = " ".join(code_sections)
     ai_found, tech_found = [], []
 
+    # AI: solo L1+L2
     for name, patterns, level, weight in AI_SIGNATURES:
-        # Solo L1 e L2 accettati
         if level > 2:
             continue
         for pat in patterns:
@@ -259,12 +296,12 @@ def detect(text: str, html: str) -> tuple[list, list]:
             except re.error:
                 continue
 
-    # Tech stack: cerca nell'HTML completo (CDN URL, meta tag, cookie names)
-    html_lower = html.lower()
+    # Tech stack: HTML + bundle
+    html_and_bundles = html + " " + " ".join(js_bundles[:3])
     for name, patterns in TECH_SIGNATURES:
         for pat in patterns:
             try:
-                if re.search(pat, html_lower, re.IGNORECASE) and name not in tech_found:
+                if re.search(pat, html_and_bundles, re.IGNORECASE) and name not in tech_found:
                     tech_found.append(name)
                     break
             except re.error:
@@ -272,6 +309,82 @@ def detect(text: str, html: str) -> tuple[list, list]:
 
     return ai_found, tech_found
 
+
+async def fetch_js_bundles(session, html: str, base_url: str) -> list:
+    """
+    Scarica fino a 3 JS bundle rilevanti per la detection AI/tech.
+    Priorità: chunk con nome vendor/main/app/framework/ai/llm.
+    Esclude: analytics, tracking, ads, polyfill, font.
+    """
+    from urllib.parse import urlparse
+    SKIP = re.compile(
+        r'analytics|gtm|gtag|facebook|fbq|pixel|adsbygoogle|hotjar|clarity|'
+        r'font|icon|emoji|polyfill|recaptcha|turnstile|cookie|consent|gdpr',
+        re.IGNORECASE
+    )
+    PRIO = re.compile(
+        r'vendor|framework|main|app|chunk|runtime|openai|anthropic|langchain|'
+        r'ai-sdk|llm|model|embed|index|bundle',
+        re.IGNORECASE
+    )
+    base = urlparse(base_url)
+    origin = f"{base.scheme}://{base.netloc}"
+
+    js_urls = []
+    for m in re.finditer(r'<script[^>]+src=["\']((https?://|/)[^"\']+\.js(?:[?#][^"\']*)?)["\']',
+                          html, re.IGNORECASE):
+        url = m.group(1)
+        if not url.startswith("http"):
+            url = origin + url
+        js_urls.append(url)
+
+    priority = [u for u in js_urls if PRIO.search(u) and not SKIP.search(u)]
+    others   = [u for u in js_urls if u not in priority and not SKIP.search(u)]
+    candidates = (priority + others)[:5]
+
+    bundles = []
+    for url in candidates:
+        if len(bundles) >= 3:
+            break
+        try:
+            async with session.get(url, headers=HEADERS,
+                                   timeout=aiohttp.ClientTimeout(total=8),
+                                   allow_redirects=True) as r:
+                if r.status == 200:
+                    content = await r.text(errors="replace")
+                    bundles.append(content[:50000])
+        except Exception:
+            pass
+    return bundles
+
+
+async def scan_domain(session, row: dict) -> dict | None:
+    domain  = row["domain"]
+    website = row.get("website") or f"https://{domain}"
+
+    html = await fetch(session, website)
+    if not html:
+        html = await fetch(session, website.rstrip("/") + "/")
+
+    if not html.strip():
+        return {"domain": domain,
+                "scan_errors": (row.get("scan_errors") or 0) + 1,
+                "last_scan_date": datetime.now(timezone.utc)}
+
+    # Scarica JS bundle per detection da codice
+    js_bundles = await fetch_js_bundles(session, html, website)
+
+    text = extract_text(html)  # solo per calc_scores (hiring/growth keywords)
+    ai_stack, tech_stack = detect(html, js_bundles)
+    scores = calc_scores(ai_stack, tech_stack, text)
+
+    return {
+        "domain":         domain,
+        "ai_stack":       json.dumps(ai_stack),
+        "tech_stack":     json.dumps(tech_stack),
+        "last_scan_date": datetime.now(timezone.utc),
+        **scores,
+    }
 
 def calc_scores(ai_stack, tech_stack, text) -> dict:
     ai_n     = len(ai_stack)
@@ -301,6 +414,7 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
 }
 
+
 async def fetch(session, url: str, timeout=10) -> str:
     try:
         async with session.get(url, headers=HEADERS,
@@ -314,32 +428,6 @@ async def fetch(session, url: str, timeout=10) -> str:
         pass
     return ""
 
-
-async def scan_domain(session, row: dict) -> dict | None:
-    domain  = row["domain"]
-    website = row.get("website") or f"https://{domain}"
-
-    pages = [website, website.rstrip("/") + "/about", website.rstrip("/") + "/technology"]
-    html_combined = ""
-    for url in pages[:2]:
-        h = await fetch(session, url)
-        if h: html_combined += " " + h
-
-    if not html_combined.strip():
-        return {"domain": domain, "scan_errors": (row.get("scan_errors") or 0) + 1,
-                "last_scan_date": datetime.now(timezone.utc)}
-
-    text = extract_text(html_combined)
-    ai_stack, tech_stack = detect(text, html_combined)
-    scores = calc_scores(ai_stack, tech_stack, text)
-
-    return {
-        "domain":         domain,
-        "ai_stack":       json.dumps(ai_stack),
-        "tech_stack":     json.dumps(tech_stack),
-        "last_scan_date": datetime.now(timezone.utc),
-        **scores,
-    }
 
 
 # ── PostgreSQL helpers ─────────────────────────────────────────────────────────
