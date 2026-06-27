@@ -251,19 +251,9 @@ AI_TECH_PAGE_PATTERNS = [
     ("MLflow",           r"\bMLflow\b"),
     ("Kubeflow",         r"\bKubeflow\b"),
     ("Ray Serve",        r"\bRay\s+Serve\b|\bAnyscale\b"),
-    ("PyTorch",          r"\bPyTorch\b"),
-    ("TensorFlow",       r"\bTensorFlow\b"),
     ("LiteLLM",          r"\bLiteLLM\b"),
     ("CrewAI",           r"\bCrewAI\b"),
     ("AutoGen",          r"\bAutoGen\b|\bpyautogen\b"),
-    # AI API — solo se esplicitamente citata come integrazione tecnica
-    ("OpenAI API",       r"\bOpenAI\s+API\b|\bOpenAI\s+SDK\b"),
-    ("Anthropic API",    r"\bAnthropic\s+(?:API|Claude)\s+API\b"),
-    ("Google Gemini API",r"\bGemini\s+API\b|\bVertex\s+AI\b"),
-    # Infra AI specifica
-    ("RAG",              r"\bRAG\b|\bRetrieval[- ]Augmented\s+Generation\b"),
-    ("Vector DB",        r"\bvector\s+(?:database|store|DB)\b|\bvectordb\b"),
-    ("Fine-tuning",      r"\bfine[- ]tun(?:ing|ed?)\s+(?:models?|LLMs?|transformers?)\b"),
 ]
 
 EXCLUDE_DOMAINS = {
@@ -976,7 +966,23 @@ def detect_ai(html: str, bundles: list, pkg_json: str = "", tech_page_text: str 
                     add(name)
             except re.error: pass
 
-    return found
+    # Normalizza: unifica varianti stesso provider, deduplicazione
+    _NORM = {
+        "OpenAI SDK": "OpenAI", "OpenAI API": "OpenAI",
+        "Anthropic SDK": "Anthropic Claude", "Anthropic API": "Anthropic Claude",
+        "Anthropic": "Anthropic Claude",
+        "Google Gemini API": "Google Gemini",
+        "Groq SDK": "Groq", "Mistral SDK": "Mistral AI", "Mistral": "Mistral AI",
+        "Cohere SDK": "Cohere", "LangChain.js": "LangChain",
+        "Ollama JS": "Ollama", "TensorFlow.js": "TensorFlow",
+    }
+    seen, out = set(), []
+    for _n in found:
+        _c = _NORM.get(_n, _n)
+        if _c not in seen:
+            seen.add(_c)
+            out.append(_c)
+    return out
 
 
 def detect_biz(html: str, bundles: list) -> dict:
