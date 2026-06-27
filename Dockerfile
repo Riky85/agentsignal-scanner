@@ -1,6 +1,3 @@
 FROM python:3.11-slim
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY scanner.py .
-CMD ["python3", "-u", "scanner.py"]
+RUN pip install --no-cache-dir aiohttp==3.9.5
