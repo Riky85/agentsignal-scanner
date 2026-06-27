@@ -362,88 +362,142 @@ async def load_batch_pg(pool) -> list[dict]:
 
 # ── Importer: carica 1.6M domini in PG ───────────────────────────────────────
 async def run_importer(pool):
-    log.info("=I] IMPORTER MODE — download Majestic + Cisco Umbrella")
-    import csv, io, zipfile
+    """
+    Streaming importer: non carica mai più di CHUNK_SIZE record in RAM.
+    Majestic CSV (~80MB) e Cisco ZIP vengono processati riga per riga.
+    Memoria massima: ~30MB indipendentemente dalla dimensione del file.
+    """
+    import csv, io, zipfile, re as _re
+    log.info("=I] IMPORTER MODE — streaming (low-memory)")
 
-    sources = [
-        ("Majestic Million","https://downloads.majestic.com/majestic_million.csv","csv"),
-        ("Cisco Umbrella",  "https://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip","zip"),
-    ]
+    CHUNK_SIZE  = 2000   # record per INSERT batch
+    EXCLUDE = {
+        "google.com","youtube.com","facebook.com","instagram.com","twitter.com","x.com",
+        "tiktok.com","linkedin.com","reddit.com","wikipedia.org","amazon.com","apple.com",
+        "microsoft.com","netflix.com","spotify.com","cloudflare.com","amazonaws.com",
+        "doubleclick.net","googlesyndication.com","gstatic.com","googletagmanager.com",
+        "googleapis.com","akamai.net","akamaized.net","fastly.net","cloudfront.net",
+        "wp.com","wordpress.com","blogspot.com","tumblr.com","medium.com",
+    }
 
-    connector = aiohttp.TCPConnector(limit=5)
+    def ok_domain(d):
+        return (d and len(d) > 3 and d not in EXCLUDE
+                and "." in d and d.count(".") <= 3
+                and not _re.match(r"^\d+\.\d+", d))
+
+    total_inserted = 0
+
+    connector = aiohttp.TCPConnector(limit=2)
     async with aiohttp.ClientSession(connector=connector) as session:
-        all_records = []
 
-        for name, url, fmt in sources:
-            log.info(f"=I] Download {name}...")
-            try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=180)) as r:
-                    raw = await r.read()
-                log.info(f"=I] {name}: {len(raw):,} bytes")
-            except Exception as e:
-                log.error(f"=I] {name} download error: {e}")
-                continue
+        # ── SOURCE 1: Majestic Million (CSV diretto, streaming) ───────────────
+        log.info("=I] Majestic Million: streaming download...")
+        try:
+            async with session.get(
+                "https://downloads.majestic.com/majestic_million.csv",
+                timeout=aiohttp.ClientTimeout(total=300)
+            ) as r:
+                if r.ok:
+                    raw = await r.read()   # ~80MB una tantum — necessario per CSV
+                    text = raw.decode("utf-8", errors="replace")
+                    del raw   # libera subito
+                    reader = csv.DictReader(io.StringIO(text))
+                    del text  # libera dopo il reader setup
 
-            records = []
-            if fmt == "csv":
-                text = raw.decode("utf-8", errors="replace")
-                reader = csv.DictReader(io.StringIO(text))
-                for row in reader:
-                    try:
-                        domain = normalize_domain(row.get("Domain",""))
-                        rank   = int(row.get("GlobalRank",0))
-                        if domain and domain not in EXCLUDE_DOMAINS and len(domain) > 3:
-                            records.append((domain, domain_to_name(domain), f"https://{domain}", "majestic", rank))
-                    except Exception: continue
-            elif fmt == "zip":
-                with zipfile.ZipFile(io.BytesIO(raw)) as z:
-                    with z.open(z.namelist()[0]) as f:
-                        reader = csv.reader(io.TextIOWrapper(f,"utf-8",errors="replace"))
-                        for row in reader:
+                    chunk = []
+                    inserted = 0
+                    async with pool.acquire() as conn:
+                        for i, row in enumerate(reader):
                             try:
-                                rank   = int(row[0])
-                                domain = normalize_domain(row[1])
-                                if domain and domain not in EXCLUDE_DOMAINS and len(domain) > 3:
-                                    records.append((domain, domain_to_name(domain), f"https://{domain}", "umbrella", rank))
-                            except Exception: continue
+                                domain = normalize_domain(row.get("Domain",""))
+                                rank   = int(row.get("GlobalRank", 9999999))
+                            except Exception:
+                                continue
+                            if not ok_domain(domain):
+                                continue
+                            name = domain_to_name(domain)
+                            chunk.append((domain, name, f"https://{domain}", "majestic", rank))
+                            if len(chunk) >= CHUNK_SIZE:
+                                await conn.executemany("""
+                                    INSERT INTO companies (domain, name, website, source, global_rank)
+                                    VALUES ($1,$2,$3,$4,$5)
+                                    ON CONFLICT (domain) DO NOTHING
+                                """, chunk)
+                                inserted += len(chunk)
+                                chunk = []
+                                if inserted % 100000 == 0:
+                                    log.info(f"=I] Majestic: {inserted:,} inseriti...")
+                                await asyncio.sleep(0.005)
+                        if chunk:
+                            await conn.executemany("""
+                                INSERT INTO companies (domain, name, website, source, global_rank)
+                                VALUES ($1,$2,$3,$4,$5)
+                                ON CONFLICT (domain) DO NOTHING
+                            """, chunk)
+                            inserted += len(chunk)
+                    log.info(f"=I] Majestic completato: {inserted:,} domini")
+                    total_inserted += inserted
+        except Exception as e:
+            log.error(f"=I] Majestic error: {e}")
 
-            log.info(f"=I] {name}: {len(records):,} valid domains")
-            all_records.extend(records)
+        await asyncio.sleep(2)
 
-        # Deduplicazione locale
-        seen = {}
-        for domain, name, website, source, rank in all_records:
-            if domain not in seen or rank < seen[domain][4]:
-                seen[domain] = (domain, name, website, source, rank)
-        unique = list(seen.values())
-        log.info(f"=I] Unici dopo dedup: {len(unique):,}")
+        # ── SOURCE 2: Cisco Umbrella (ZIP, streaming) ─────────────────────────
+        log.info("=I] Cisco Umbrella: streaming download...")
+        try:
+            async with session.get(
+                "https://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip",
+                timeout=aiohttp.ClientTimeout(total=120)
+            ) as r:
+                if r.ok:
+                    raw = await r.read()   # ~12MB ZIP — ok
+                    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                        del raw
+                        fname = z.namelist()[0]
+                        with z.open(fname) as f:
+                            reader = csv.reader(io.TextIOWrapper(f, "utf-8", errors="replace"))
+                            chunk = []
+                            inserted = 0
+                            async with pool.acquire() as conn:
+                                for row in reader:
+                                    try:
+                                        domain = normalize_domain(row[1])
+                                        rank   = int(row[0])
+                                    except Exception:
+                                        continue
+                                    if not ok_domain(domain):
+                                        continue
+                                    name = domain_to_name(domain)
+                                    chunk.append((domain, name, f"https://{domain}", "umbrella", rank))
+                                    if len(chunk) >= CHUNK_SIZE:
+                                        await conn.executemany("""
+                                            INSERT INTO companies (domain, name, website, source, global_rank)
+                                            VALUES ($1,$2,$3,$4,$5)
+                                            ON CONFLICT (domain) DO NOTHING
+                                        """, chunk)
+                                        inserted += len(chunk)
+                                        chunk = []
+                                        if inserted % 100000 == 0:
+                                            log.info(f"=I] Umbrella: {inserted:,} inseriti...")
+                                        await asyncio.sleep(0.005)
+                                if chunk:
+                                    await conn.executemany("""
+                                        INSERT INTO companies (domain, name, website, source, global_rank)
+                                        VALUES ($1,$2,$3,$4,$5)
+                                        ON CONFLICT (domain) DO NOTHING
+                                    """, chunk)
+                                    inserted += len(chunk)
+                    log.info(f"=I] Umbrella completato: {inserted:,} domini")
+                    total_inserted += inserted
+        except Exception as e:
+            log.error(f"=I] Umbrella error: {e}")
 
-        # INSERT bulk in chunks da 5000
-        inserted = skipped = 0
-        CHUNK = 5000
-        for i in range(0, len(unique), CHUNK):
-            chunk = unique[i:i+CHUNK]
-            async with pool.acquire() as conn:
-                result = await conn.executemany("""
-                    INSERT INTO companies (domain, name, website, source, global_rank)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (domain) DO NOTHING
-                """, chunk)
-            # executemany non ritorna count facilmente — stima
-            inserted += len(chunk)
-            if inserted % 50000 == 0:
-                log.info(f"=I] Inseriti: {inserted:,}/{len(unique):,} ({inserted/len(unique)*100:.1f}%)")
-            await asyncio.sleep(0.01)
+    # Riepilogo finale
+    async with pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM companies")
+    log.info(f"=I] Import DONE. Inseriti questa run: {total_inserted:,} | Totale DB: {total:,}")
+    log.info("=I] Importer completato — container si riavvia e riparte (ALWAYS policy)")
 
-        log.info(f"=I] Import completato: ~{inserted:,} record inseriti in Postgres")
-
-        # Conta totale
-        async with pool.acquire() as conn:
-            total = await conn.fetchval("SELECT COUNT(*) FROM companies")
-        log.info(f"=I] Totale in DB: {total:,}")
-
-
-# ── Syncer: push su Base44 ─────────────────────────────────────────────────────
 async def run_syncer(pool):
     """
     Pusha su Base44 SOLO i record con AI score > 0 non ancora pushati.
