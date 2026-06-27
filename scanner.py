@@ -445,57 +445,69 @@ async def write_to_base44(session, cid, payload, retries=3):
     return False
 
 # Stato di avanzamento per ogni worker (persistente nel processo)
-_worker_skip = None  # inizializzato al primo run
+# Cursore globale: ogni worker inizia nella sua zona e avanza in step di TOTAL_WORKERS batch
+_worker_skip = -1   # -1 = non inizializzato
 
 async def load_batch(session):
     """
-    Carica aziende da scansionare usando sort=last_scan_date:
-    - NULL viene prima (mai scansionate)
-    - Poi le più vecchie in ordine crescente
+    Logica zona-worker corretta:
+    - Worker 0 → skip 0, BATCH*3, BATCH*6, ...
+    - Worker 1 → skip BATCH*1, BATCH*4, BATCH*7, ...
+    - Worker 2 → skip BATCH*2, BATCH*5, BATCH*8, ...
     
-    Ogni worker parte da un offset diverso e avanza sequenzialmente.
-    Quando arriva in fondo, riparte da 0 (ciclo continuo, rescan ogni ~7gg).
-    
-    Worker 0 → skip parte da 0
-    Worker 1 → skip parte da TOTAL_DB/TOTAL_WORKERS * 1
-    Worker 2 → skip parte da TOTAL_DB/TOTAL_WORKERS * 2
+    sort=last_scan_date → NULL prima (mai scansionate), poi le più vecchie.
+    Filtra fuori le aziende scansionate nelle ultime RESCAN_DAYS ore.
     """
     global _worker_skip
-    TOTAL_DB_ESTIMATE = 35000  # aggiornato ogni ciclo
 
-    if _worker_skip is None:
-        # Inizializzazione: ogni worker parte dalla sua zona
-        zone_size = TOTAL_DB_ESTIMATE // TOTAL_WORKERS
-        _worker_skip = WORKER_ID * zone_size
-        log.info(f"Worker {WORKER_ID} inizia da skip={_worker_skip}")
+    if _worker_skip == -1:
+        _worker_skip = WORKER_ID * BATCH_SIZE
+        log.info(f"[W{WORKER_ID}] Inizia da skip={_worker_skip}")
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=RESCAN_DAYS)).isoformat()
 
     for attempt in range(5):
         try:
             params = {
                 "limit": BATCH_SIZE,
                 "skip": _worker_skip,
-                "sort": "last_scan_date",  # NULL prima, poi più vecchie
+                "sort": "last_scan_date",  # NULL prima, poi ASC
                 "fields": "id,name,website,last_scan_date,employee_count,industry,description,country",
             }
             async with session.get(f"{BASE}/Company", headers=HR, params=params,
                                    timeout=aiohttp.ClientTimeout(total=30)) as r:
-                if r.ok:
-                    data = await r.json()
-                    if isinstance(data, list) and data:
-                        # Avanza il cursore per il prossimo batch
-                        _worker_skip += BATCH_SIZE
-                        # Reset quando supera la fine del DB
-                        if len(data) < BATCH_SIZE:
-                            log.info(f"Worker {WORKER_ID}: fine DB raggiunta, ricomincio da skip={WORKER_ID * (TOTAL_DB_ESTIMATE // TOTAL_WORKERS)}")
-                            _worker_skip = WORKER_ID * (TOTAL_DB_ESTIMATE // TOTAL_WORKERS)
-                        return data
-                    else:
-                        # Fine del DB — reset
-                        _worker_skip = WORKER_ID * (TOTAL_DB_ESTIMATE // TOTAL_WORKERS)
-                        log.info(f"Worker {WORKER_ID}: reset skip a {_worker_skip}")
-                        return []
+                if not r.ok:
+                    log.warning(f"[W{WORKER_ID}] HTTP {r.status} su load_batch")
+                    await asyncio.sleep(10)
+                    continue
+
+                data = await r.json()
+                if not isinstance(data, list): data = []
+
+                # Filtra: solo aziende non scansionate o scansionate > RESCAN_DAYS fa
+                pending = [
+                    c for c in data
+                    if not c.get("last_scan_date") or c["last_scan_date"] < cutoff
+                ]
+
+                if pending:
+                    _worker_skip += BATCH_SIZE * TOTAL_WORKERS
+                    log.info(f"[W{WORKER_ID}] Batch {len(pending)}/{len(data)} pending | skip→{_worker_skip}")
+                    return pending
+                elif len(data) < BATCH_SIZE:
+                    # Fine del DB — ricomincia dalla zona iniziale
+                    _worker_skip = WORKER_ID * BATCH_SIZE
+                    log.info(f"[W{WORKER_ID}] Fine DB — ricomincio da skip={_worker_skip}")
+                    return []
+                else:
+                    # Tutte già scansionate in questo batch → salta avanti
+                    _worker_skip += BATCH_SIZE * TOTAL_WORKERS
+                    log.info(f"[W{WORKER_ID}] Batch tutto già scansionato, salto a skip={_worker_skip}")
+                    # Non returnare [] — loop continua al prossimo batch
+                    continue
+
         except Exception as e:
-            log.warning(f"load_batch attempt {attempt+1}: {e}")
+            log.warning(f"[W{WORKER_ID}] load_batch attempt {attempt+1}: {e}")
             await asyncio.sleep(5)
     return []
 
