@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 AgentSignal Railway Scanner v6.0
 ==================================
@@ -554,6 +555,8 @@ async def scan_domain(session, row: dict) -> dict | None:
         **scores,
     }
 
+
+# ── Detection Engine v10 ────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 # AGENTSIGNAL DETECTION ENGINE v10 — DEEP CODE SCAN
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1183,14 +1186,342 @@ async def scan_domain(session, row: dict) -> dict | None:
     visible_text = extract_text(html)
     scores = calc_scores(ai_stack, biz_stack, tech_stack, visible_text)
 
+    # Step 5: Company enrichment (description, CEO, revenue, founded)
+    try:
+        company_name = row.get("name") or domain_to_name(domain)
+        enrichment   = await enrich_company(session, domain, company_name)
+    except Exception:
+        enrichment = {}
+
     return {
         "domain":         domain,
         "ai_stack":       json.dumps(ai_stack),
         "tech_stack":     json.dumps(tech_stack),
         "biz_stack":      json.dumps(biz_stack),
+        "description":    enrichment.get("description") or None,
+        "industry":       enrichment.get("industry") or None,
+        "founded_year":   enrichment.get("founded_year") or None,
+        "org_chart":      enrichment.get("org_chart") or None,
+        "logo_url":       enrichment.get("logo_url") or None,
+        "linkedin_url":   enrichment.get("linkedin_url") or None,
         "last_scan_date": datetime.now(timezone.utc),
         **scores,
     }
+
+
+# ── Enricher v2 ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# AGENTSIGNAL ENRICHER v2 — Company Intelligence Enrichment
+# Fonti (tutte gratuite):
+#   1. Schema.org JSON-LD (homepage)   → description, logo, linkedin, founded
+#   2. Meta tags (homepage)            → description fallback
+#   3. DuckDuckGo Instant API          → abstract, revenue, founded, key people
+#   4. /about /team /leadership pages  → people + titles
+#   5. Clearbit Logo API               → logo fallback
+# ══════════════════════════════════════════════════════════════════════════════
+
+import re, json, asyncio, aiohttp
+from urllib.parse import urlparse
+
+HEADERS_WEB = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,*/*;q=0.8",
+}
+HEADERS_DDG = {"User-Agent": "Mozilla/5.0 (compatible; AgentSignal/1.0)"}
+
+EXEC_TITLE_RE = re.compile(
+    r'\b(CEO|Chief Executive Officer|Co-Founder|Founder|CTO|Chief Technology Officer|'
+    r'COO|Chief Operating Officer|CFO|Chief Financial Officer|President|'
+    r'VP of (?:Engineering|Product|Sales|Marketing)|'
+    r'Head of (?:Engineering|Product|Design|Sales)|'
+    r'Managing Director|General Manager)\b',
+    re.IGNORECASE
+)
+STOP_WORDS = re.compile(
+    r'\b(About|Our|The|We|Join|Meet|Leadership|Team|Company|Products?|Services?|'
+    r'See|View|Read|Learn|Contact|Home|Back|Next|More|Get|New|All|By|For|At|In|On)\b',
+    re.IGNORECASE
+)
+NAME_RE = re.compile(r'\b([A-Z][a-z]{1,20}\s+(?:[A-Z][a-z]{0,3}\.\s+)?[A-Z][a-z]{1,25})\b')
+
+
+async def _fetch(session, url, timeout=9):
+    try:
+        async with session.get(
+            url, headers=HEADERS_WEB,
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            allow_redirects=True, max_redirects=3, ssl=False
+        ) as r:
+            if r.status == 200:
+                return (await r.read()).decode("utf-8", errors="replace")
+    except Exception:
+        pass
+    return ""
+
+
+def _schema_org(html):
+    result = {}
+    for m in re.finditer(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html, re.DOTALL | re.IGNORECASE
+    ):
+        try:
+            d = json.loads(m.group(1).strip())
+            nodes = d if isinstance(d, list) else d.get("@graph", [d])
+            for node in nodes:
+                t = str(node.get("@type", ""))
+                if not any(x in t for x in ("Organization","Corporation","LocalBusiness","Company")):
+                    continue
+                if not result.get("description"):
+                    desc = node.get("description") or node.get("slogan","")
+                    if desc: result["description"] = str(desc)[:500]
+                if not result.get("founded_year"):
+                    fd = node.get("foundingDate","")
+                    if fd: result["founded_year"] = str(fd)[:4]
+                emp = node.get("numberOfEmployees")
+                if isinstance(emp, dict) and not result.get("employee_count"):
+                    result["employee_count"] = emp.get("value")
+                elif emp and not result.get("employee_count"):
+                    result["employee_count"] = emp
+                logo = node.get("logo")
+                if not result.get("logo_url"):
+                    if isinstance(logo, dict): result["logo_url"] = logo.get("url","")
+                    elif isinstance(logo, str): result["logo_url"] = logo
+                same_as = node.get("sameAs") or []
+                if isinstance(same_as, str): same_as = [same_as]
+                for url in same_as:
+                    if "linkedin.com/company" in url and not result.get("linkedin_url"):
+                        result["linkedin_url"] = url
+                    if ("twitter.com" in url or "x.com" in url) and not result.get("twitter_url"):
+                        result["twitter_url"] = url
+                # Founder
+                founder = node.get("founder") or node.get("founders")
+                if founder:
+                    fl = founder if isinstance(founder, list) else [founder]
+                    for f in fl[:2]:
+                        name = (f.get("name","") if isinstance(f,dict) else str(f)).strip()
+                        if name and len(name.split()) >= 2:
+                            result.setdefault("people",[]).append(
+                                {"name": name, "title": "Founder"}
+                            )
+        except Exception:
+            pass
+    return result
+
+
+def _meta_description(html):
+    best = ""
+    for m in re.finditer(
+        r'<meta[^>]+(?:property|name)\s*=\s*["\']([^"\']+)["\'][^>]+content\s*=\s*["\']([^"\']{15,500})["\']',
+        html, re.IGNORECASE
+    ):
+        prop, content = m.group(1).lower(), m.group(2).strip()
+        if prop in ("og:description","twitter:description","description"):
+            if len(content) > len(best):
+                best = content
+    return best
+
+
+async def _duckduckgo(session, company_name):
+    """DuckDuckGo Instant Answer API — gratuita, no auth."""
+    try:
+        async with session.get(
+            "https://api.duckduckgo.com/",
+            params={"q": company_name, "format": "json",
+                    "no_html": "1", "skip_disambig": "1"},
+            headers=HEADERS_DDG,
+            timeout=aiohttp.ClientTimeout(total=8), ssl=False
+        ) as r:
+            if r.status != 200: return {}
+            d = await r.json(content_type=None)
+    except Exception:
+        return {}
+
+    result = {}
+
+    abstract = str(d.get("Abstract","")).strip()
+    if abstract and len(abstract) > 30:
+        result["ddg_abstract"] = abstract[:600]
+
+    infobox = d.get("Infobox") or {}
+    items   = infobox.get("content") or [] if isinstance(infobox, dict) else []
+    for item in items:
+        if not isinstance(item, dict): continue
+        label = str(item.get("label","")).lower()
+        value = str(item.get("value","")).strip()
+        if not value: continue
+        if "founded" in label:
+            y = re.search(r'\d{4}', value)
+            if y: result["founded_year"] = y.group()
+        elif "revenue" in label:
+            result["revenue_range"] = value[:60]
+        elif "employee" in label or "headcount" in label:
+            n = re.search(r'[\d,]+', value.replace(",",""))
+            if n: result["employee_count_ddg"] = int(n.group().replace(",",""))
+        elif "key people" in label or "ceo" in label or "founder" in label:
+            result.setdefault("key_people_raw", []).append(value[:100])
+        elif "industry" in label:
+            result["industry"] = value[:80]
+        elif "headquarters" in label or "location" in label:
+            result["hq"] = value[:80]
+
+    return result
+
+
+def _parse_people(html, limit=8):
+    """Estrae people con titoli dalla pagina /about o /team."""
+    people = []
+    seen   = set()
+
+    # JSON-LD Person (più affidabile)
+    for m in re.finditer(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html, re.DOTALL | re.IGNORECASE
+    ):
+        try:
+            d = json.loads(m.group(1))
+            nodes = d if isinstance(d, list) else d.get("@graph", [d])
+            for node in nodes:
+                if str(node.get("@type","")) != "Person": continue
+                name  = str(node.get("name","")).strip()
+                title = str(node.get("jobTitle","")).strip()
+                if len(name.split()) < 2 or name.lower() in seen: continue
+                seen.add(name.lower())
+                entry = {"name": name, "title": title}
+                li = node.get("sameAs","")
+                if isinstance(li, list):
+                    li = next((x for x in li if "linkedin" in str(x)),"")
+                if "linkedin" in str(li): entry["linkedin"] = li
+                people.append(entry)
+        except: pass
+
+    if len(people) >= 3:
+        return people[:limit]
+
+    # HTML fallback: trova titolo exec + nome vicino
+    text = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.DOTALL|re.IGNORECASE)
+    text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.DOTALL|re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', '|', text)
+    segs = [s.strip() for s in re.split(r'\|+', text) if s.strip() and len(s.strip()) > 1]
+
+    for i, seg in enumerate(segs):
+        if not EXEC_TITLE_RE.search(seg) or len(seg) > 100: continue
+        title = seg.strip()[:80]
+        window = segs[max(0,i-10):i+10]
+        for w in window:
+            if len(w) < 4 or len(w) > 50: continue
+            if STOP_WORDS.match(w.strip()): continue
+            names = NAME_RE.findall(w)
+            for name in names:
+                if len(name.split()) < 2: continue
+                if STOP_WORDS.search(name): continue
+                key = name.lower()
+                if key in seen: continue
+                seen.add(key)
+                people.append({"name": name, "title": title})
+                if len(people) >= limit: return people
+    return people
+
+
+def _infer_range(n):
+    if not n: return None
+    try:
+        n = int(str(n).replace(",","").split("-")[0])
+        if n < 11:    return "1-10"
+        if n < 51:    return "11-50"
+        if n < 201:   return "51-200"
+        if n < 501:   return "201-500"
+        if n < 1001:  return "501-1K"
+        if n < 5001:  return "1K-5K"
+        if n < 10001: return "5K-10K"
+        if n < 50001: return "10K-50K"
+        return "50K+"
+    except:
+        return None
+
+
+async def enrich_company(session, domain, company_name=None):
+    """
+    Arricchisce azienda con description, people, logo, revenue, founded, ecc.
+    100% gratuito — Schema.org + DuckDuckGo + page scraping.
+    """
+    if not company_name:
+        company_name = re.sub(r"[-_]"," ", domain.split(".")[0]).title()
+
+    base = f"https://{domain}"
+
+    # Fetch tutto in parallelo
+    homepage, about_pg, team_pg, leadership_pg, ddg = await asyncio.gather(
+        _fetch(session, base, 10),
+        _fetch(session, f"{base}/about", 7),
+        _fetch(session, f"{base}/team", 7),
+        _fetch(session, f"{base}/leadership", 7),
+        _duckduckgo(session, company_name),
+    )
+
+    schema = _schema_org(homepage)
+    meta   = _meta_description(homepage)
+
+    # People da tutte le pagine
+    people, seen_keys = [], set()
+    for html_src in [about_pg, team_pg, leadership_pg]:
+        for p in _parse_people(html_src):
+            k = p["name"].lower()
+            if k not in seen_keys:
+                seen_keys.add(k); people.append(p)
+    people = people[:8]
+
+    # Key people da DuckDuckGo
+    for raw in ddg.get("key_people_raw",[]):
+        m = re.search(r'([A-Z][a-z]+ [A-Z][a-z]+)', raw)
+        title_m = re.search(r'\(([^)]+)\)', raw)
+        if m:
+            name  = m.group(1)
+            title = title_m.group(1) if title_m else ""
+            k = name.lower()
+            if k not in seen_keys:
+                seen_keys.add(k)
+                people.append({"name": name, "title": title})
+
+    # Description finale (priorità)
+    description = (
+        schema.get("description") or
+        ddg.get("ddg_abstract") or
+        meta or
+        ""
+    )[:500]
+
+    # Employee count
+    emp = schema.get("employee_count") or ddg.get("employee_count_ddg")
+    emp_range = _infer_range(emp)
+
+    # Revenue
+    revenue = ddg.get("revenue_range","")
+
+    # Founded
+    founded = schema.get("founded_year") or ddg.get("founded_year","")
+
+    # Logo
+    logo = schema.get("logo_url") or f"https://logo.clearbit.com/{domain}"
+
+    # Org chart (CEO + exec) come JSON per il campo org_chart
+    org_chart = json.dumps(people) if people else "[]"
+
+    return {
+        "description":    description,
+        "employee_count": int(str(emp).replace(",","")) if emp else None,
+        "revenue_range":  revenue or None,
+        "founded_year":   founded or None,
+        "logo_url":       logo,
+        "linkedin_url":   schema.get("linkedin_url",""),
+        "twitter_url":    schema.get("twitter_url",""),
+        "industry":       ddg.get("industry",""),
+        "country":        ddg.get("hq","").split(",")[-1].strip() if ddg.get("hq") else None,
+        "people":         people,
+        "org_chart":      org_chart,
+    }
+
 
 # ── PostgreSQL helpers ─────────────────────────────────────────────────────────
 async def ensure_schema(pool):
@@ -1201,6 +1532,10 @@ async def ensure_schema(pool):
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS biz_stack JSONB DEFAULT '{}'",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS last_push_date TIMESTAMPTZ",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS base44_id TEXT",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS description TEXT",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS industry TEXT",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS founded_year TEXT",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS org_chart JSONB DEFAULT '[]'",
             "CREATE INDEX IF NOT EXISTS idx_companies_push ON companies(last_push_date NULLS FIRST) WHERE ai_score > 0",
         ]
         for sql in migrations:
@@ -1232,6 +1567,12 @@ async def write_scan_result(pool, result: dict):
                 tech_gap_score  = $14,
                 last_scan_date  = $15,
                 scan_errors     = COALESCE($16, scan_errors),
+                description     = COALESCE($18, description),
+                industry        = COALESCE($19, industry),
+                founded_year    = COALESCE($20, founded_year),
+                org_chart       = COALESCE($21::jsonb, org_chart),
+                logo_url        = COALESCE($22, logo_url),
+                linkedin_url    = COALESCE($23, linkedin_url),
                 updated_at      = NOW()
             WHERE domain = $17
         """,
@@ -1252,6 +1593,12 @@ async def write_scan_result(pool, result: dict):
             result.get("last_scan_date"),
             result.get("scan_errors"),
             result["domain"],
+            result.get("description") or None,
+            result.get("industry") or None,
+            result.get("founded_year") or None,
+            result.get("org_chart") or None,
+            result.get("logo_url") or None,
+            result.get("linkedin_url") or None,
         )
 
 
@@ -1515,6 +1862,9 @@ async def run_syncer(pool):
                     "logo_url":                r.get("logo_url"),
                     "ai_transformation_score": r.get("maturity_score",0),
                     "ats_technology_adoption":  json.dumps(json.loads(r.get("biz_stack") or "{}")),
+                    "description":              r.get("description") or None,
+                    "industry":                 r.get("industry") or None,
+                    "org_chart":                r.get("org_chart") or None,
                 }
                 payload = {k:v for k,v in payload.items() if v is not None}
 
