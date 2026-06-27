@@ -274,24 +274,94 @@ async def sync_loop(pool):
                 f"total_pushed={pushed_total:,} errors={errors_total}"
             )
 
+            # Dedup ogni 5 cicli (≈45 min) — rimuove duplicati dal DB Base44
+            if cycle % 5 == 0:
+                log.info("=== DEDUP START (ogni 5 cicli) ===")
+                try:
+                    await _dedup_b44(session)
+                except Exception as _de:
+                    log.warning(f"Dedup error: {_de}")
+                log.info("=== DEDUP DONE ===")
+
     finally:
         await session.close()
         await connector.close()
 
 
-async def run_dedup():
-    """Elimina duplicati da Base44: tieni il record più ricco per ogni nome."""
+async def _dedup_b44(session):
+    """Scarica tutti i record Base44, trova duplicati per nome, elimina i meno ricchi."""
     from collections import defaultdict
     import re
-    connector = aiohttp.TCPConnector(limit=5, ssl=False)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        await _run_dedup_inner(session)
+    HDR = {"api-key": B44_API_KEY, "Content-Type": "application/json"}
 
-async def _run_dedup_inner(session):
-    from collections import defaultdict
-    import re
-    B44_HDR = {"api-key": "", "Content-Type": "application/json"}
-    B44_URL = "https://app.base44.com/api/apps/6a3a284ab0b87dfa27558bb6/entities/Company"
+    def norm(s): return re.sub(r"[\s\-\.]", "", (s or "").strip().lower())
+    def richness(c):
+        ai = c.get("ai_stack") or []
+        if isinstance(ai, str):
+            try: ai = json.loads(ai)
+            except: ai = []
+        return (bool(c.get("description"))*10 + bool(c.get("employee_count"))*5 +
+                bool(c.get("industry"))*3 + bool(c.get("logo_url"))*2 +
+                len(ai)*2 + float(c.get("ai_adoption_score") or 0)*0.1)
+
+    # Scarica tutti i record paginati
+    all_cos, skip = [], 0
+    while True:
+        try:
+            async with session.get(
+                f"{BASE_URL}?limit=500&skip={skip}&fields=id,name,website,ai_adoption_score,description,employee_count,industry,ai_stack,logo_url",
+                headers=HDR, timeout=aiohttp.ClientTimeout(total=30), ssl=False
+            ) as r:
+                batch = await r.json(content_type=None)
+            if not batch or not isinstance(batch, list): break
+            all_cos.extend(batch)
+            if len(batch) < 500: break
+            skip += 500
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            log.warning(f"Dedup fetch err: {e}")
+            break
+
+    log.info(f"  Dedup: {len(all_cos):,} record scaricati")
+
+    by_name = defaultdict(list)
+    for c in all_cos:
+        k = norm(c.get("name", ""))
+        if k: by_name[k].append(c)
+
+    dup_groups = {k: v for k, v in by_name.items() if len(v) > 1}
+    extra = sum(len(v)-1 for v in dup_groups.values())
+    log.info(f"  Dedup: {len(dup_groups)} gruppi | {extra} duplicati da rimuovere")
+    if not dup_groups: return
+
+    deleted = merged = 0
+    for records in dup_groups.values():
+        sorted_r = sorted(records, key=richness, reverse=True)
+        keeper, dupes = sorted_r[0], sorted_r[1:]
+
+        patch = {}
+        for d in dupes:
+            if not keeper.get("description") and d.get("description"): patch["description"] = d["description"]
+            if not keeper.get("employee_count") and d.get("employee_count"): patch["employee_count"] = d["employee_count"]
+            if not keeper.get("industry") and d.get("industry"): patch["industry"] = d["industry"]
+            if not keeper.get("logo_url") and d.get("logo_url"): patch["logo_url"] = d["logo_url"]
+
+        if patch:
+            try:
+                async with session.put(f"{BASE_URL}/{keeper['id']}", headers=HDR,
+                    json=patch, timeout=aiohttp.ClientTimeout(total=12), ssl=False) as r:
+                    if r.status == 200: merged += 1
+            except: pass
+
+        for d in dupes:
+            try:
+                async with session.delete(f"{BASE_URL}/{d['id']}", headers=HDR,
+                    timeout=aiohttp.ClientTimeout(total=8), ssl=False) as r:
+                    if r.status in (200, 204): deleted += 1
+            except: pass
+            await asyncio.sleep(0.08)
+
+    log.info(f"  Dedup: eliminati={deleted} merged={merged} ✓")
 
     def norm(s): return re.sub(r"[\s\-\.]","", (s or "").strip().lower())
     def richness(c):
