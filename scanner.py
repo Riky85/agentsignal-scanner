@@ -45,7 +45,7 @@ WORKER_ID     = int(os.environ.get("WORKER_ID", "0"))
 TOTAL_WORKERS = int(os.environ.get("TOTAL_WORKERS", "3"))
 THREADS       = int(os.environ.get("THREADS", "30"))
 BATCH_SIZE    = int(os.environ.get("BATCH_SIZE", "500"))
-RESCAN_DAYS   = int(os.environ.get("RESCAN_DAYS", "14"))
+RESCAN_DAYS   = int(os.environ.get("RESCAN_DAYS", "0"))   # 0 = rescan tutto
 PORT          = int(os.environ.get("PORT", "8080"))
 MODE          = os.environ.get("MODE", "scanner")  # scanner | importer | syncer
 
