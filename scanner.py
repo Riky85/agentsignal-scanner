@@ -87,8 +87,29 @@ CREATE TABLE IF NOT EXISTS companies (
     last_push_date  TIMESTAMPTZ,    -- ultima volta che è stato pushato su Base44
     scan_errors     INT DEFAULT 0,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ DEFAULT NOW()
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+
+    -- v10 fields: Tech & Business Intelligence
+    description     TEXT,
+    org_chart       JSONB DEFAULT '[]',
+    biz_stack       JSONB DEFAULT '{}',
+    technology_dna  JSONB DEFAULT '{}',
+    ats_documentation TEXT,
+    ats_product_signals JSONB DEFAULT '[]',
+    founded_year    INT,
+    founded_date    TEXT
 );
+
+-- Aggiungi colonne se non esistono (ALTER per DB già esistente)
+DO $$ BEGIN
+    BEGIN ALTER TABLE companies ADD COLUMN description TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END;
+    BEGIN ALTER TABLE companies ADD COLUMN org_chart JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END;
+    BEGIN ALTER TABLE companies ADD COLUMN biz_stack JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END;
+    BEGIN ALTER TABLE companies ADD COLUMN technology_dna JSONB DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END;
+    BEGIN ALTER TABLE companies ADD COLUMN ats_documentation TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END;
+    BEGIN ALTER TABLE companies ADD COLUMN ats_product_signals JSONB DEFAULT '[]'; EXCEPTION WHEN duplicate_column THEN NULL; END;
+    BEGIN ALTER TABLE companies ADD COLUMN founded_year INT; EXCEPTION WHEN duplicate_column THEN NULL; END;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_companies_scan   ON companies(last_scan_date NULLS FIRST);
 CREATE INDEX IF NOT EXISTS idx_companies_push   ON companies(last_push_date NULLS FIRST) WHERE ai_score > 0;
