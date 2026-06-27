@@ -1545,6 +1545,14 @@ async def ensure_schema(pool):
                 log.warning(f"Migration skip: {e}")
     log.info("=0] Schema DB OK")
 
+    # Worker 0: resetta last_scan_date → forza riscansione completa di tutto il DB
+    if WORKER_ID == 0 and os.environ.get("SKIP_RESET","0") != "1":
+        async with pool.acquire() as conn:
+            n = await conn.fetchval("SELECT COUNT(*) FROM companies WHERE last_scan_date IS NOT NULL")
+            await conn.execute("UPDATE companies SET last_scan_date = NULL")
+        log.info(f"=0] FULL RESCAN RESET: {n:,} record azzerati — ripartenza totale")
+
+
 
 async def write_scan_result(pool, result: dict):
     if not result: return
