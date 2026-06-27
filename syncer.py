@@ -20,34 +20,77 @@ start_time   = time.time()
 
 
 def build_payload(r):
-    def sj(v):
+    def sj(v, fallback=None):
+        """Parse JSON string → list/dict, oppure restituisce il valore."""
+        if v is None: return fallback
+        if isinstance(v, (list, dict)): return v
         if isinstance(v, str):
             try: return json.loads(v)
-            except: return []
-        return v or []
+            except: return fallback
+        return fallback
+
+    def sstr(v):
+        """Stringa o None."""
+        return str(v).strip() if v and str(v).strip() else None
+
+    def sfloat(v):
+        try: return float(v) if v is not None else 0.0
+        except: return 0.0
+
+    # org_chart: lista di people [{name, title, linkedin}]
+    org = sj(r.get("org_chart"), [])
+
+    # Estrai CEO dal org_chart
+    ceo_name = None
+    for person in (org or []):
+        title = str(person.get("title","")).lower()
+        if any(t in title for t in ["ceo","chief executive","founder","co-founder"]):
+            ceo_name = person.get("name","")
+            break
+
     p = {
-        "name":                    r.get("name") or r["domain"].split(".")[0].title(),
-        "website":                 r.get("website") or "https://" + r["domain"],
-        "source":                  r.get("source") or "railway",
-        "ai_stack":                sj(r.get("ai_stack")),
-        "tech_stack":              sj(r.get("tech_stack")),
-        "ai_adoption_score":       float(r.get("ai_score") or 0),
-        "ai_maturity_score":       float(r.get("maturity_score") or 0),
-        "ai_buying_intent_score":  float(r.get("intent_score") or 0),
-        "ai_transformation_score": float(r.get("maturity_score") or 0),
-        "cloud_score":             float(r.get("cloud_score") or 0),
-        "automation_score":        float(r.get("automation_score") or 0),
-        "developer_score":         float(r.get("developer_score") or 0),
-        "security_score":          float(r.get("security_score") or 0),
-        "growth_score":            float(r.get("growth_score") or 0),
-        "innovation_score":        float(r.get("innovation_score") or 0),
-        "commerce_score":          float(r.get("commerce_score") or 0),
-        "tech_gap_score":          float(r.get("tech_gap_score") or 0),
-        "global_rank":             r.get("global_rank"),
+        # Dati aziendali base
+        "name":                    sstr(r.get("name")) or r["domain"].split(".")[0].title(),
+        "website":                 sstr(r.get("website")) or "https://" + r["domain"],
+        "source":                  sstr(r.get("source")) or "railway",
+        "description":             sstr(r.get("description")),
+        "industry":                sstr(r.get("industry")),
+        "country":                 sstr(r.get("country")),
+        "logo_url":                sstr(r.get("logo_url")),
+        "employee_count":          int(r["employee_count"]) if r.get("employee_count") else None,
+        "revenue_range":           sstr(r.get("revenue_range")),
+
+        # Stack tecnologico
+        "ai_stack":                sj(r.get("ai_stack"), []),
+        "tech_stack":              sj(r.get("tech_stack"), []),
+
+        # Org chart (people con ruoli)
+        "org_chart":               org,
+
+        # Scores AI & digitali
+        "ai_adoption_score":       sfloat(r.get("ai_score")),
+        "ai_maturity_score":       sfloat(r.get("maturity_score")),
+        "ai_buying_intent_score":  sfloat(r.get("intent_score")),
+        "ai_transformation_score": sfloat(r.get("maturity_score")),
+        "cloud_score":             sfloat(r.get("cloud_score")),
+        "automation_score":        sfloat(r.get("automation_score")),
+        "developer_score":         sfloat(r.get("developer_score")),
+        "security_score":          sfloat(r.get("security_score")),
+        "growth_score":            sfloat(r.get("growth_score")),
+        "innovation_score":        sfloat(r.get("innovation_score")),
+        "commerce_score":          sfloat(r.get("commerce_score")),
+        "tech_gap_score":          sfloat(r.get("tech_gap_score")),
+
+        # Meta
+        "global_rank":             int(r["global_rank"]) if r.get("global_rank") else None,
+        "ats_hiring_signals":      f"CEO: {ceo_name}" if ceo_name else None,
     }
     if r.get("last_scan_date"):
-        p["last_scan_date"] = r["last_scan_date"].isoformat()
-    return {k: v for k, v in p.items() if v is not None and v != []}
+        p["last_scan_date"] = r["last_scan_date"].isoformat() if hasattr(r["last_scan_date"], "isoformat") else str(r["last_scan_date"])
+
+    # Filtra valori vuoti ma mantieni 0.0 per gli scores
+    return {k: v for k, v in p.items()
+            if v is not None and v != [] and v != {}}
 
 
 async def push_one(session, pool, r):
