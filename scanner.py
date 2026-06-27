@@ -1179,11 +1179,11 @@ async def scan_domain(session, row: dict) -> dict | None:
 
     tech_dna    = detect_tech_dna(html, bundles)
     ai_signals  = detect_ai_signals({
-        "careers":  await _safe_fetch(session, website + "/careers"),
-        "jobs":     await _safe_fetch(session, website + "/jobs"),
-        "blog":     await _safe_fetch(session, website + "/blog"),
-        "product":  await _safe_fetch(session, website + "/product"),
-        "features": await _safe_fetch(session, website + "/features"),
+        "careers":  (await _fetch(session, website + "/careers",  6) or ""),
+        "jobs":     (await _fetch(session, website + "/jobs",      6) or ""),
+        "blog":     (await _fetch(session, website + "/blog",      6) or ""),
+        "product":  (await _fetch(session, website + "/product",   6) or ""),
+        "features": (await _fetch(session, website + "/features",  6) or ""),
     })
 
     # Compatibilità legacy: ai_stack = segnali AI come lista
