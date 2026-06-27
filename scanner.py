@@ -678,6 +678,18 @@ async def scan_domain(session, row: dict) -> dict | None:
 async def ensure_schema(pool):
     async with pool.acquire() as conn:
         await conn.execute(SCHEMA_SQL)
+        # Aggiungi colonne nuove se mancanti (tabella già esistente)
+        migrations = [
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS biz_stack JSONB DEFAULT '{}'",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS last_push_date TIMESTAMPTZ",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS base44_id TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_companies_push ON companies(last_push_date NULLS FIRST) WHERE ai_score > 0",
+        ]
+        for sql in migrations:
+            try:
+                await conn.execute(sql)
+            except Exception as e:
+                log.warning(f"Migration skip: {e}")
     log.info("=0] Schema DB OK")
 
 
