@@ -20,85 +20,71 @@ start_time   = time.time()
 
 
 def build_payload(r):
-    def sj(v, fallback=None):
-        """Parse JSON string → list/dict, oppure restituisce il valore."""
-        if v is None: return fallback
-        if isinstance(v, (list, dict)): return v
+    """Payload per Base44. Schema Base44: tech_stack/ai_stack=array, scores=integer, ats_*=number (non inviare come stringa)."""
+    def _list(v):
+        if v is None: return []
+        if isinstance(v, list): return v
         if isinstance(v, str):
-            try: return json.loads(v)
-            except: return fallback
-        return fallback
+            try:
+                r2 = json.loads(v)
+                return r2 if isinstance(r2, list) else []
+            except: return []
+        return []
 
     def sstr(v):
-        """Stringa o None."""
-        return str(v).strip() if v and str(v).strip() else None
+        s = str(v).strip() if v is not None else ""
+        return s if s and s not in ("None", "null", "[]", "{}", "") else None
 
-    def sfloat(v):
-        try: return float(v) if v is not None else 0.0
-        except: return 0.0
+    def sint(v):
+        try: return max(0, min(100, int(float(v)))) if v is not None else 0
+        except: return 0
 
-    # org_chart: lista di people [{name, title, linkedin}]
-    org = sj(r.get("org_chart"), [])
+    # Org chart (array)
+    org = _list(r.get("org_chart"))
 
-    # Estrai CEO dal org_chart
-    ceo_name = None
-    for person in (org or []):
-        title = str(person.get("title","")).lower()
-        if any(t in title for t in ["ceo","chief executive","founder","co-founder"]):
-            ceo_name = person.get("name","")
-            break
+    # tech_stack: usa tech_stack oppure ricostruisce da technology_dna
+    ts = _list(r.get("tech_stack"))
+    if not ts:
+        td_raw = r.get("technology_dna") or r.get("biz_stack")
+        if td_raw:
+            try:
+                td_dict = json.loads(td_raw) if isinstance(td_raw, str) else td_raw
+                if isinstance(td_dict, dict):
+                    ts = [t for tools in td_dict.values()
+                          for t in (tools if isinstance(tools, list) else [])]
+            except: pass
 
-    p = {
-        # Dati aziendali base
-        "name":                    sstr(r.get("name")) or r["domain"].split(".")[0].title(),
-        "website":                 sstr(r.get("website")) or "https://" + r["domain"],
-        "source":                  sstr(r.get("source")) or "railway",
+    # AI stack (array di segnali)
+    ai = _list(r.get("ai_stack"))
 
-        # Stack tecnologico (Technology & Business Intelligence v10)
-        "ai_stack":                sj(r.get("ai_stack"), []),
-        "tech_stack":              sj(r.get("tech_stack"), []),
-        "technology_dna":          sj(r.get("technology_dna"), {}),
-        "ats_documentation":       sstr(r.get("ats_documentation")),
-        "ats_product_signals":     sj(r.get("ats_product_signals"), []),
-        "ats_recent_changes":      sstr(r.get("ats_documentation")),
-
-        # Org chart (people con ruoli)
-        "org_chart":               org,
-
-        # Enrichment fields
-        "description":             sstr(r.get("description")),
-        "industry":                sstr(r.get("industry")),
-        "country":                 sstr(r.get("country")),
-        "logo_url":                sstr(r.get("logo_url")),
-        "linkedin_url":            sstr(r.get("linkedin_url")),
-        "employee_count":          int(r["employee_count"]) if r.get("employee_count") else None,
-        "revenue_range":           sstr(r.get("revenue_range")),
-
-        # Scores AI & digitali
-        "ai_adoption_score":       sfloat(r.get("ai_score")),
-        "ai_maturity_score":       sfloat(r.get("maturity_score")),
-        "ai_buying_intent_score":  sfloat(r.get("intent_score")),
-        "ai_transformation_score": sfloat(r.get("maturity_score")),
-        "cloud_score":             sfloat(r.get("cloud_score")),
-        "automation_score":        sfloat(r.get("automation_score")),
-        "developer_score":         sfloat(r.get("developer_score")),
-        "security_score":          sfloat(r.get("security_score")),
-        "growth_score":            sfloat(r.get("growth_score")),
-        "innovation_score":        sfloat(r.get("innovation_score")),
-        "commerce_score":          sfloat(r.get("commerce_score")),
-        "tech_gap_score":          sfloat(r.get("tech_gap_score")),
-
-        # Meta
-        "global_rank":             int(r["global_rank"]) if r.get("global_rank") else None,
-        "ats_hiring_signals":      f"CEO: {ceo_name}" if ceo_name else None,
+    return {
+        "name":                   sstr(r.get("name")) or r["domain"].split(".")[0].title(),
+        "website":                sstr(r.get("website")) or "https://" + r["domain"],
+        "source":                 sstr(r.get("source")) or "railway",
+        "description":            sstr(r.get("description")),
+        "industry":               sstr(r.get("industry")),
+        "country":                sstr(r.get("country")),
+        "logo_url":               sstr(r.get("logo_url")),
+        "linkedin_url":           sstr(r.get("linkedin_url")),
+        "employee_count":         int(r["employee_count"]) if r.get("employee_count") else None,
+        "revenue_range":          sstr(r.get("revenue_range")),
+        "global_rank":            int(r["global_rank"]) if r.get("global_rank") else None,
+        "ai_stack":               ai,
+        "tech_stack":             ts,
+        "org_chart":              org,
+        "ai_adoption_score":      sint(r.get("ai_score") or r.get("ai_readiness") or 0),
+        "ai_maturity_score":      min(5, sint(r.get("maturity_score") or r.get("digital_maturity") or 0) // 20),
+        "ai_buying_intent_score": sint(r.get("intent_score") or r.get("buying_intent") or 0),
+        "ai_transformation_score":sint(r.get("ai_score") or 0),
+        "cloud_score":            sint(r.get("cloud_score") or r.get("cloud_maturity") or 0),
+        "automation_score":       sint(r.get("automation_score") or r.get("automation_level") or 0),
+        "developer_score":        sint(r.get("developer_score") or 0),
+        "security_score":         sint(r.get("security_score") or 0),
+        "growth_score":           sint(r.get("growth_score") or 0),
+        "innovation_score":       sint(r.get("innovation_score") or 0),
+        "commerce_score":         sint(r.get("commerce_score") or 0),
+        "tech_gap_score":         sint(r.get("tech_gap_score") or 0),
     }
-    if r.get("last_scan_date"):
-        p["last_scan_date"] = r["last_scan_date"].isoformat() if hasattr(r["last_scan_date"], "isoformat") else str(r["last_scan_date"])
-
-    # Filtra valori vuoti ma mantieni 0.0 per gli scores
-    return {k: v for k, v in p.items()
-            if v is not None and v != [] and v != {}}
-
 
 async def push_one(session, pool, r):
     global pushed_total, errors_total
