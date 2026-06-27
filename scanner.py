@@ -1965,7 +1965,7 @@ async def run_scanner(pool):
                             if ai_stack:  ai_n  += 1
                             if biz_stack: biz_n += 1
                     except Exception as e:
-                        log.debug(f"process error: {e}")
+                        log.warning(f"=W{WORKER_ID}] process error: {type(e).__name__}: {e}")
                     finally:
                         done += 1
                         if done % 100 == 0:
