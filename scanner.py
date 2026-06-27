@@ -1556,21 +1556,22 @@ async def ensure_schema(pool):
 
 async def write_scan_result(pool, result: dict):
     if not result: return
-    # Normalizza jsonb: asyncpg richiede dict/list Python, non stringhe JSON
-    try:
-        biz_raw = result.get("biz_stack") or "{}"
-        biz = json.loads(biz_raw) if isinstance(biz_raw, str) else (biz_raw or {})
-    except Exception: biz = {}
-    try:
-        orc_raw = result.get("org_chart") or "[]"
-        orc = json.loads(orc_raw) if isinstance(orc_raw, str) else (orc_raw or [])
-    except Exception: orc = []
+    # Serializza JSONB come stringa — asyncpg usa cast ::text::jsonb nel SQL
+    def to_json_str(v, fallback="{}"):
+        if v is None: return fallback
+        if isinstance(v, (dict, list)): return json.dumps(v)
+        try: json.loads(v); return v  # già stringa JSON valida
+        except: return fallback
+    biz = to_json_str(result.get("biz_stack"), "{}")
+    orc = to_json_str(result.get("org_chart"), "[]")
+    ais = to_json_str(result.get("ai_stack"), "[]")
+    tec = to_json_str(result.get("tech_stack"), "[]")
     async with pool.acquire() as conn:
         await conn.execute("""
             UPDATE companies SET
-                ai_stack        = $1,
-                tech_stack      = $2,
-                biz_stack       = $3,
+                ai_stack        = $1::text::jsonb,
+                tech_stack      = $2::text::jsonb,
+                biz_stack       = $3::text::jsonb,
                 ai_score        = $4,
                 maturity_score  = $5,
                 cloud_score     = $6,
@@ -1593,8 +1594,8 @@ async def write_scan_result(pool, result: dict):
                 updated_at      = NOW()
             WHERE domain = $17
         """,
-            result.get("ai_stack","[]"),
-            result.get("tech_stack","[]"),
+            ais,
+            tec,
             biz,
             result.get("ai_score",0),
             result.get("maturity_score",0),
