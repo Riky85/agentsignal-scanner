@@ -1548,6 +1548,9 @@ async def ensure_schema(pool):
 
 async def write_scan_result(pool, result: dict):
     if not result: return
+    # Normalizza valori jsonb — asyncpg richiede stringhe JSON valide o None
+    biz  = result.get("biz_stack") or "{}"
+    orc  = result.get("org_chart") or "[]"
     async with pool.acquire() as conn:
         await conn.execute("""
             UPDATE companies SET
@@ -1578,7 +1581,7 @@ async def write_scan_result(pool, result: dict):
         """,
             result.get("ai_stack","[]"),
             result.get("tech_stack","[]"),
-            result.get("biz_stack","{}"),
+            biz,
             result.get("ai_score",0),
             result.get("maturity_score",0),
             result.get("cloud_score",0),
@@ -1596,7 +1599,7 @@ async def write_scan_result(pool, result: dict):
             result.get("description") or None,
             result.get("industry") or None,
             result.get("founded_year") or None,
-            result.get("org_chart") or None,
+            orc,
             result.get("logo_url") or None,
             result.get("linkedin_url") or None,
         )
