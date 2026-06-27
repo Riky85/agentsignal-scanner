@@ -1,1 +1,1 @@
-web: bash run.sh
+web: python3 -u scanner.py
