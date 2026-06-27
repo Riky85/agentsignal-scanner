@@ -4,10 +4,10 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python3 -u scanner.py",
-    "restartPolicyType": "ALWAYS",
-    "restartPolicyMaxRetries": 10,
+    "startCommand": "python3 -u ${SCRIPT:-scanner.py}",
     "healthcheckPath": "/",
-    "healthcheckTimeout": 60
+    "healthcheckTimeout": 60,
+    "restartPolicyType": "ALWAYS",
+    "restartPolicyMaxRetries": 10
   }
 }
