@@ -98,6 +98,29 @@ async def push_one(session, pool, r):
     payload = build_payload(r)
     domain  = r["domain"]
     b44_id  = r.get("base44_id")
+    
+    # UPSERT GUARD: se non abbiamo base44_id, cerca per website prima di fare POST
+    if not b44_id:
+        name_q = (r.get("name") or domain.split(".")[0]).replace(" ","+")
+        try:
+            async with session.get(
+                f"{BASE_URL}?limit=3&fields=id,name,website",
+                headers={"api-key": HW["api-key"]},
+                params={"name_filter": r.get("name","")},
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as gr:
+                existing = await gr.json(content_type=None) if gr.status == 200 else []
+            # Cerca match per website
+            my_site = payload.get("website","").rstrip("/").lower()
+            for ex in (existing or []):
+                ex_site = (ex.get("website","") or "").rstrip("/").lower()
+                if ex_site and ex_site == my_site:
+                    b44_id = ex["id"]
+                    async with pool.acquire() as c:
+                        await c.execute("UPDATE companies SET base44_id=$1 WHERE domain=$2", b44_id, domain)
+                    break
+        except: pass
+    
     try:
         if b44_id:
             async with session.put(
