@@ -178,8 +178,6 @@ AI_PKG_SIGNATURES = [
     ("Haystack",       r'"haystack-ai"\s*:\s*"[\^~]?\d+\.\d'),
     ("CrewAI",         r'"crewai"\s*:\s*"[\^~]?\d+\.\d'),
     ("AutoGen",        r'"pyautogen"\s*:\s*"[\^~]?\d+\.\d'),
-    ("PyTorch",        r'"torch"\s*:\s*"[\^~]?\d+\.\d'),
-    ("TensorFlow",     r'"@tensorflow/tfjs"\s*:\s*"[\^~]?\d+\.\d'),
     ("Langfuse",       r'"langfuse"\s*:\s*"[\^~]?\d+\.\d'),
     ("OpenAI Embed",   r'"openai-embeddings"\s*:\s*"[\^~]?\d+\.\d'),
 ]
@@ -731,18 +729,13 @@ AI_TECH_PAGE = [
     ("Ollama",         r"\bOllama\b"),
     ("MLflow",         r"\bMLflow\b"),
     ("Kubeflow",       r"\bKubeflow\b"),
-    ("PyTorch",        r"\bPyTorch\b"),
-    ("TensorFlow",     r"\bTensorFlow\b"),
     ("LiteLLM",        r"\bLiteLLM\b"),
     ("CrewAI",         r"\bCrewAI\b"),
     ("AutoGen",        r"\bAutoGen\b"),
     ("Langfuse",       r"\bLangfuse\b"),
     ("LangSmith",      r"\bLangSmith\b"),
     ("RAG pipeline",   r"\bRAG\b|\bRetrieval[- ]Augmented\s+Generation\b"),
-    ("Vector DB",      r"\bvector\s+(?:database|store|DB|index)\b"),
-    ("Fine-tuning",    r"\bfine[- ]tun(?:ing|ed?)\s+(?:models?|LLMs?|transformers?)\b"),
     # Solo OpenAI/Anthropic se citati come stack tecnico usato (non partner)
-    ("OpenAI API",     r"\bOpenAI\s+(?:API|SDK|GPT-4)\b"),
     ("Anthropic Claude", r"\bClaude\s+(?:3|API|Opus|Sonnet|Haiku)\b"),
     ("Google Gemini",  r"\bGemini\s+(?:1\.5|API|Pro|Ultra)\b"),
     ("Mistral",        r"\bMistral\s+(?:7B|8x7B|Large|API)\b"),
@@ -968,13 +961,9 @@ def detect_ai(html: str, bundles: list, pkg_json: str = "", tech_page_text: str 
 
     # Normalizza: unifica varianti stesso provider, deduplicazione
     _NORM = {
-        "OpenAI SDK": "OpenAI", "OpenAI API": "OpenAI",
-        "Anthropic SDK": "Anthropic Claude", "Anthropic API": "Anthropic Claude",
         "Anthropic": "Anthropic Claude",
-        "Google Gemini API": "Google Gemini",
         "Groq SDK": "Groq", "Mistral SDK": "Mistral AI", "Mistral": "Mistral AI",
         "Cohere SDK": "Cohere", "LangChain.js": "LangChain",
-        "Ollama JS": "Ollama", "TensorFlow.js": "TensorFlow",
     }
     seen, out = set(), []
     for _n in found:
@@ -1468,6 +1457,20 @@ async def enrich_company(session, domain, company_name=None):
         _duckduckgo(session, company_name),
     )
 
+    # Aggiorna nome da og:site_name della homepage (più affidabile di domain.split)
+    if homepage:
+        import re as _re
+        _og_pats = [
+            r'property="og:site_name"\s+content="([^"]{2,50})"',
+            r'content="([^"]{2,50})"\s+property="og:site_name"',
+            r"property='og:site_name'\s+content='([^']{2,50})'",
+            r"content='([^']{2,50})'\s+property='og:site_name'",
+        ]
+        for _p in _og_pats:
+            _m = _re.search(_p, homepage, _re.IGNORECASE)
+            if _m and _m.group(1).strip():
+                company_name = _m.group(1).strip()
+                break
     schema = _schema_org(homepage)
     meta   = _meta_description(homepage)
 
