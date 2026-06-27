@@ -102,43 +102,58 @@ PRODUCTIVITY_BLACKLIST = {
     "outlook","dropbox","box.com","sharepoint","onedrive",
 }
 
+# ── AI Detection Signatures ────────────────────────────────────────────────────
+# REGOLA FONDAMENTALE: solo pattern TECNICI verificabili dal codice sorgente.
+# L1 = endpoint API o chiave univoca (certezza assoluta)
+# L2 = package name, SDK, import path inequivocabile
+# L3/L4 RIMOSSI: menzioni testuali, nomi in articoli, blog, UI copy → falsi positivi
+#
+# Pattern L1: URL endpoint API + chiavi/token univoci
+# Pattern L2: nome package npm/pip, import path, CDN SDK
+# Nessun pattern che matcha testo libero (titoli, news, blog, descrizioni prodotto)
+
 AI_SIGNATURES = [
-    ("OpenAI",       [r"api\.openai\.com", r"openai\.com/v1/", r"OPENAI_API_KEY", r"sk-[a-zA-Z0-9]{20}"], 1, 40),
-    ("Anthropic",    [r"api\.anthropic\.com", r"anthropic\.com/v1", r"ANTHROPIC_API_KEY", r"sk-ant-"], 1, 40),
-    ("Google AI",    [r"generativelanguage\.googleapis\.com", r"aiplatform\.googleapis\.com", r"vertexai"], 1, 38),
-    ("Azure OpenAI", [r"openai\.azure\.com", r"\.openai\.azure\.com/openai/deployments"], 1, 38),
-    ("AWS Bedrock",  [r"bedrock-runtime\.amazonaws\.com", r"bedrock\.amazonaws\.com"], 1, 38),
-    ("Cohere",       [r"api\.cohere\.ai", r"api\.cohere\.com", r"cohere-python"], 1, 35),
-    ("Mistral",      [r"api\.mistral\.ai", r"mistral-client"], 1, 35),
-    ("Groq",         [r"api\.groq\.com", r"groq-sdk", r"groq\.com/openai/v1"], 1, 35),
-    ("Perplexity",   [r"api\.perplexity\.ai"], 1, 33),
-    ("Together AI",  [r"api\.together\.xyz", r"together\.ai/inference"], 1, 33),
-    ("Replicate",    [r"api\.replicate\.com"], 1, 33),
-    ("xAI Grok",     [r"api\.x\.ai", r"x\.ai/api/v1"], 1, 33),
-    ("Fireworks AI", [r"api\.fireworks\.ai"], 1, 32),
-    ("Deepseek",     [r"api\.deepseek\.com", r"deepseek-chat"], 1, 32),
-    ("LangChain",    [r"langchain", r"from langchain", r"langchain-core"], 2, 25),
-    ("LlamaIndex",   [r"llama.?index", r"llama_index", r"from llama_index"], 2, 25),
-    ("Hugging Face", [r"huggingface\.co", r"from transformers"], 2, 22),
-    ("Pinecone",     [r"pinecone\.io", r"pinecone-client", r"pinecone\.init"], 2, 22),
-    ("Weaviate",     [r"weaviate\.io", r"weaviate-client"], 2, 20),
-    ("Qdrant",       [r"qdrant\.tech", r"qdrant-client"], 2, 20),
-    ("Chroma",       [r"chromadb", r"chroma-db"], 2, 18),
-    ("PyTorch",      [r"pytorch\.org", r"torch\.nn", r"import torch"], 2, 15),
-    ("TensorFlow",   [r"tensorflow\.org", r"import tensorflow"], 2, 15),
-    ("Ollama",       [r"ollama\.ai", r"ollama-python", r"ollama\.chat"], 2, 20),
-    ("Stable Diffusion", [r"stabilityai", r"stability\.ai"], 2, 18),
-    ("Vercel AI SDK",[r"@vercel/ai", r"ai-sdk", r"vercel\.com/ai"], 3, 15),
-    ("ChatGPT",      [r"chatgpt", r"chat\.openai\.com"], 3, 15),
-    ("Claude",       [r"claude\.ai", r"anthropic claude", r"claude-3"], 3, 15),
-    ("Gemini",       [r"gemini\.google\.com", r"google gemini", r"gemini-pro"], 3, 15),
-    ("Cursor",       [r"cursor\.sh", r"cursor\.so", r"cursor ai"], 3, 12),
-    ("Langfuse",     [r"langfuse\.com"], 3, 12),
-    ("AI Platform",  [r"/ai\b", r"/artificial-intelligence\b", r"/machine-learning\b"], 4, 8),
-    ("ML Hiring",    [r"machine learning engineer", r"ai researcher", r"llm engineer"], 4, 8),
-    ("AI Features",  [r"powered by ai", r"ai-powered", r"artificial intelligence platform"], 4, 6),
+    # ── Tier 1: endpoint API — solo chiamate dirette al provider ──────────────
+    ("OpenAI",        [r"api\.openai\.com", r"OPENAI_API_KEY\s*=", r'"sk-[a-zA-Z0-9\-_]{20,}"'], 1, 40),
+    ("Anthropic",     [r"api\.anthropic\.com", r"ANTHROPIC_API_KEY\s*=", r'"sk-ant-[a-zA-Z0-9\-_]{10,}"'], 1, 40),
+    ("Google AI",     [r"generativelanguage\.googleapis\.com", r"aiplatform\.googleapis\.com", r"vertexai\.preview"], 1, 38),
+    ("Azure OpenAI",  [r"openai\.azure\.com/openai/deployments", r"\.openai\.azure\.com"], 1, 38),
+    ("AWS Bedrock",   [r"bedrock-runtime\.amazonaws\.com", r"bedrock\.amazonaws\.com/model/"], 1, 38),
+    ("Cohere",        [r"api\.cohere\.ai/v", r"api\.cohere\.com/v"], 1, 35),
+    ("Mistral",       [r"api\.mistral\.ai/v"], 1, 35),
+    ("Groq",          [r"api\.groq\.com/openai/v1"], 1, 35),
+    ("Perplexity",    [r"api\.perplexity\.ai/chat/completions"], 1, 33),
+    ("Together AI",   [r"api\.together\.xyz/v1/completions", r"api\.together\.ai/v1"], 1, 33),
+    ("Replicate",     [r"api\.replicate\.com/v1/predictions"], 1, 33),
+    ("xAI Grok",      [r"api\.x\.ai/v1/chat", r"api\.x\.ai/v1/completions"], 1, 33),
+    ("Fireworks AI",  [r"api\.fireworks\.ai/inference/v1"], 1, 32),
+    ("Deepseek",      [r"api\.deepseek\.com/v1"], 1, 32),
+    ("ElevenLabs",    [r"api\.elevenlabs\.io/v1"], 1, 30),
+    ("Stability AI",  [r"api\.stability\.ai/v1/generation"], 1, 30),
+
+    # ── Tier 2: SDK / package inequivocabile ──────────────────────────────────
+    # Solo import/require esatti o CDN path — non nomi generici
+    ("LangChain",     [r"from langchain[_\-\.]", r"require\(['\"]langchain", r"langchain-core@", r"@langchain/core"], 2, 25),
+    ("LlamaIndex",    [r"from llama_index\.", r"llama-index==", r"llama_index\.core"], 2, 25),
+    ("Hugging Face",  [r"from transformers import", r"huggingface\.co/models/", r"pipeline\(['\"]text-generation"], 2, 22),
+    ("Pinecone",      [r"pinecone\.init\(", r"from pinecone import", r"pinecone-client==", r"@pinecone-database/pinecone"], 2, 22),
+    ("Weaviate",      [r"weaviate\.connect_to", r"import weaviate$", r"weaviate-client=="], 2, 20),
+    ("Qdrant",        [r"QdrantClient\(", r"qdrant-client==", r"from qdrant_client import"], 2, 20),
+    ("Chroma",        [r"chromadb\.Client\(", r"import chromadb$", r"chromadb=="], 2, 18),
+    ("PyTorch",       [r"import torch\b", r"torch\.nn\.Module", r"torch==\d"], 2, 15),
+    ("TensorFlow",    [r"import tensorflow as tf", r"tensorflow==\d", r"tf\.keras\."], 2, 15),
+    ("Ollama",        [r"ollama\.chat\(", r"ollama\.generate\(", r"from ollama import"], 2, 20),
+    ("Vercel AI SDK", [r"from ['\"]@vercel/ai['\"]", r"require\(['\"]@vercel/ai['\"]", r"ai@\d+\.\d+\.\d+"], 2, 18),
+    ("OpenAI SDK",    [r"from openai import", r"require\(['\"]openai['\"]", r"openai==\d"], 2, 20),
+    ("Anthropic SDK", [r"from anthropic import", r"require\(['\"]@anthropic-ai/sdk['\"]"], 2, 20),
+    ("Langfuse",      [r"from langfuse import", r"langfuse\.com/api", r"langfuse==\d"], 2, 12),
+    ("LiteLLM",       [r"import litellm\b", r"litellm\.completion\("], 2, 15),
+    ("Haystack",      [r"from haystack import", r"haystack==\d"], 2, 15),
+    ("AutoGen",       [r"from autogen import", r"autogen==\d", r"microsoft/autogen"], 2, 15),
+    ("CrewAI",        [r"from crewai import", r"crewai==\d"], 2, 15),
 ]
 
+# ── Tech stack: solo CDN/SDK path inequivocabili ───────────────────────────────
 TECH_SIGNATURES = [
     ("React",     [r"react\.js", r"reactjs", r"_react", r"__REACT"]),
     ("Next.js",   [r"next\.js", r"_next/static", r"__NEXT_DATA__"]),
@@ -201,26 +216,60 @@ def extract_text(html: str) -> str:
     return text + " " + " ".join(json_parts).lower()
 
 
+
 def detect(text: str, html: str) -> tuple[list, list]:
-    combined = (text + " " + html).lower()
+    """
+    Detection STRICT: accetta SOLO pattern tecnici L1 (endpoint API) e L2 (SDK/package).
+    L3/L4 rimossi — eliminano i falsi positivi da articoli, blog, UI copy, news sites.
+    Il pattern viene cercato nell'HTML grezzo (codice JS, tag script, meta, headers CDN)
+    NON nel testo visibile estratto dalla pagina.
+    """
+    # Cerca nei tag script e negli URL CDN — NON nel testo visibile
+    # Estrai solo: script src, inline JS, meta http-equiv, link href, commenti HTML
+    code_sections = []
+
+    # Script inline
+    for m in re.finditer(r'<script[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE):
+        code_sections.append(m.group(1))
+
+    # Script src / link href / img src (CDN fingerprint)
+    for m in re.finditer(r'(?:src|href|action|data-src)\s*=\s*["\']([^"\']{4,})["\']', html, re.IGNORECASE):
+        code_sections.append(m.group(1))
+
+    # JSON embedded (__NEXT_DATA__, __NUXT_DATA__, ecc.)
+    for m in re.finditer(r'(?:__NEXT_DATA__|__NUXT__|__remixContext)\s*=\s*({.*?})\s*[;<]', html, re.DOTALL):
+        code_sections.append(m.group(1))
+
+    # HTTP response headers riflessi nel DOM (x-powered-by, cf-ray, ecc.)
+    code_combined = " ".join(code_sections).lower()
+
     ai_found, tech_found = [], []
+
     for name, patterns, level, weight in AI_SIGNATURES:
+        # Solo L1 e L2 accettati
+        if level > 2:
+            continue
         for pat in patterns:
             try:
-                if re.search(pat, combined, re.IGNORECASE):
-                    if name.lower().replace(" ","") not in PRODUCTIVITY_BLACKLIST and name not in ai_found:
+                if re.search(pat, code_combined, re.IGNORECASE):
+                    n_lower = name.lower().replace(" ", "")
+                    if n_lower not in PRODUCTIVITY_BLACKLIST and name not in ai_found:
                         ai_found.append(name)
                     break
             except re.error:
                 continue
+
+    # Tech stack: cerca nell'HTML completo (CDN URL, meta tag, cookie names)
+    html_lower = html.lower()
     for name, patterns in TECH_SIGNATURES:
         for pat in patterns:
             try:
-                if re.search(pat, combined, re.IGNORECASE) and name not in tech_found:
+                if re.search(pat, html_lower, re.IGNORECASE) and name not in tech_found:
                     tech_found.append(name)
                     break
             except re.error:
                 continue
+
     return ai_found, tech_found
 
 
