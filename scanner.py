@@ -1958,11 +1958,11 @@ async def run_scanner(pool):
 
             log.info(f"=W{WORKER_ID}] Batch: {len(batch)} domini")
             sem   = asyncio.Semaphore(THREADS)
-            done  = ok = ai_n = 0
+            done  = ok = ai_n = biz_n = 0
             t_bat = time.time()
 
             async def process(row):
-                nonlocal done, ok, ai_n
+                nonlocal done, ok, ai_n, biz_n
                 async with sem:
                     try:
                         result = await scan_domain(session, row)
