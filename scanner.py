@@ -1235,10 +1235,15 @@ async def scan_domain(session, row: dict) -> dict | None:
         "ats_product_signals": json.dumps(ai_signals[:5]),  # AI signals dettagliati
         "description":         enrichment.get("description") or None,
         "industry":            enrichment.get("industry") or None,
+        "employee_count":      enrichment.get("employee_count") or None,
+        "revenue_range":       enrichment.get("revenue_range") or None,
+        "country":             enrichment.get("country") or None,
         "founded_year":        enrichment.get("founded_year") or None,
-        "org_chart":           enrichment.get("org_chart") or None,
+        "org_chart":           json.dumps(enrichment.get("org_chart") or []),
         "logo_url":            enrichment.get("logo_url") or None,
         "linkedin_url":        enrichment.get("linkedin_url") or None,
+        "biz_stack":           json.dumps(biz_stack) if isinstance(biz_stack, dict) else "{}",
+        "technology_dna":      json.dumps(tech_dna) if isinstance(tech_dna, dict) else "{}",
         "last_scan_date":      datetime.now(timezone.utc),
         **scores,
     }
