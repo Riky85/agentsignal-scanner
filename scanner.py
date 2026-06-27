@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS companies (
     employee_count  INT,
     revenue_range   TEXT,
     logo_url        TEXT,
+    linkedin_url    TEXT,
+    twitter_url     TEXT,
     
     -- Scan results
     ai_stack        JSONB DEFAULT '[]',
@@ -1536,6 +1538,12 @@ async def ensure_schema(pool):
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS industry TEXT",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS founded_year TEXT",
             "ALTER TABLE companies ADD COLUMN IF NOT EXISTS org_chart JSONB DEFAULT '[]'",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS linkedin_url TEXT",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS twitter_url TEXT",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS tech_stack JSONB DEFAULT '[]'",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS tech_gap_score INT DEFAULT 0",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS innovation_score INT DEFAULT 0",
+            "ALTER TABLE companies ADD COLUMN IF NOT EXISTS commerce_score INT DEFAULT 0",
             "CREATE INDEX IF NOT EXISTS idx_companies_push ON companies(last_push_date NULLS FIRST) WHERE ai_score > 0",
         ]
         for sql in migrations:
