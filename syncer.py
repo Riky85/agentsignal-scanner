@@ -231,7 +231,7 @@ async def sync_loop(pool):
     """
     # ── DEDUP all'avvio: elimina duplicati Base44 ───────────────────────
     log.info("=== DEDUP START ===")
-    await run_dedup(session)
+    await run_dedup()  # crea sessione interna
     log.info("=== DEDUP DONE ===")
 
     log.info(f"Sync loop start | rate=1/{RATE_DELAY}s | batch={BATCH_SIZE}")
@@ -279,8 +279,15 @@ async def sync_loop(pool):
         await connector.close()
 
 
-async def run_dedup(session):
+async def run_dedup():
     """Elimina duplicati da Base44: tieni il record più ricco per ogni nome."""
+    from collections import defaultdict
+    import re
+    connector = aiohttp.TCPConnector(limit=5, ssl=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        await _run_dedup_inner(session)
+
+async def _run_dedup_inner(session):
     from collections import defaultdict
     import re
     B44_HDR = {"api-key": "", "Content-Type": "application/json"}
