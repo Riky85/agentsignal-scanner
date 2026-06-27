@@ -273,4 +273,12 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    mode = os.environ.get("MODE","syncer")
+    if mode == "enricher":
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("enricher_worker","./enricher_worker.py")
+        mod  = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        asyncio.run(mod.main())
+    else:
+        asyncio.run(main())
