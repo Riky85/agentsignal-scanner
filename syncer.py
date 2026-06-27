@@ -230,9 +230,6 @@ async def sync_loop(pool):
     Questo risolve il bug 'Session is closed'.
     """
     # ── DEDUP all'avvio: elimina duplicati Base44 ───────────────────────
-    log.info("=== DEDUP START ===")
-    await run_dedup()  # crea sessione interna
-    log.info("=== DEDUP DONE ===")
 
     log.info(f"Sync loop start | rate=1/{RATE_DELAY}s | batch={BATCH_SIZE}")
 
