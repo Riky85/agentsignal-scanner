@@ -94,17 +94,35 @@ CREATE INDEX IF NOT EXISTS idx_companies_ai     ON companies(ai_score DESC) WHER
 CREATE INDEX IF NOT EXISTS idx_companies_worker ON companies(id) WHERE last_scan_date IS NULL;
 """
 
-# ── AI / Tech Signatures ──────────────────────────────────────────────────────
+
 # ══════════════════════════════════════════════════════════════════════════════
-# DETECTION ENGINE v8 — SOLO SEGNALI DA CODICE SORGENTE
+# DETECTION ENGINE v9 — STRATEGIA REALISTICA
 # ══════════════════════════════════════════════════════════════════════════════
-# REGOLE:
-#   1. Cerco solo in: script inline JS, src/href CDN, JSON embedded SPA,
-#      contenuto dei JS bundle scaricati separatamente.
-#   2. MAI nel testo visibile (paragrafi, titoli, articoli, blog).
-#   3. Pattern inequivocabili: endpoint API, path package npm/pip esatti,
-#      costruttori SDK, CDN URL con nome pacchetto versioned.
-#   4. Nessun L3/L4 — zero menzioni testuali.
+#
+# REALTÀ DEL WEB SCRAPING AI:
+#   - I bundle JS frontend NON contengono mai SDK AI (OpenAI/LangChain vivono
+#     nel backend server-side, invisibili al browser)
+#   - I siti enterprise bloccano i crawler con WAF/CDN
+#   - Le pagine /careers redirigono su ATS esterni (Greenhouse, Lever, Workday)
+#
+# STRATEGIA v9 — TRE LIVELLI:
+#   L1. Codice sorgente (homepage + bundle JS):
+#       - Endpoint API nelle chiamate fetch/XHR dello script frontend
+#       - Dipendenze npm/pip nei manifest JSON embedded
+#       - CDN imports con versione (unpkg, jsDelivr, esm.sh)
+#       - Header HTTP riflessi (x-powered-by: Next.js, server: nginx)
+#
+#   L2. Pagine di riferimento tecnico (non editoriali):
+#       - /stack, /tech, /engineering, /about/technology
+#       - robots.txt, /.well-known/security.txt
+#       - sitemap.xml (rivela struttura del sito)
+#       Pattern: solo TOOL NAMES specifici (LangChain, Pinecone, ecc.)
+#       — non acronimi generici come "LLM", "AI", "ML"
+#
+#   L3. ATS hiring pages — seguiamo redirect a Greenhouse/Lever/Workday:
+#       - Cerca job role con tool tecnici specifici nel titolo/descrizione
+#       - Solo tool inequivocabili (LangChain, Pinecone, Weaviate, ecc.)
+#       - NON: "AI Engineer", "ML Engineer" (troppo generici)
 
 PRODUCTIVITY_BLACKLIST = {
     "microsoftoffice","googledocs","googlesheets","googleslides","googledrive",
@@ -112,170 +130,138 @@ PRODUCTIVITY_BLACKLIST = {
     "jira","trello","asana","monday","clickup","airtable",
 }
 
-AI_SIGNATURES = [
-    # L1 — endpoint API diretti
-    ("OpenAI",         [r"api\.openai\.com",
-                        r"OPENAI_API_KEY\s*[=:]",
-                        r"['\"]sk-[a-zA-Z0-9\-_]{32,}['\"]"],             1, 40),
-    ("Anthropic",      [r"api\.anthropic\.com",
-                        r"ANTHROPIC_API_KEY\s*[=:]",
-                        r"['\"]sk-ant-[a-zA-Z0-9\-_]{10,}['\"]"],         1, 40),
-    ("Google AI",      [r"generativelanguage\.googleapis\.com",
-                        r"aiplatform\.googleapis\.com",
-                        r"vertexai\.preview\.GenerativeModel"],             1, 38),
-    ("Azure OpenAI",   [r"openai\.azure\.com/openai/deployments"],          1, 38),
-    ("AWS Bedrock",    [r"bedrock-runtime\.amazonaws\.com",
-                        r"bedrock\.amazonaws\.com/model/"],                 1, 38),
-    ("Cohere",         [r"api\.cohere\.ai/v\d",
-                        r"api\.cohere\.com/v\d"],                           1, 35),
-    ("Mistral",        [r"api\.mistral\.ai/v\d"],                           1, 35),
-    ("Groq",           [r"api\.groq\.com/openai/v\d"],                     1, 35),
-    ("Perplexity",     [r"api\.perplexity\.ai/chat/completions"],           1, 33),
-    ("Together AI",    [r"api\.together\.xyz/v\d",
-                        r"api\.together\.ai/v\d"],                          1, 33),
-    ("Replicate",      [r"api\.replicate\.com/v\d/predictions"],            1, 33),
-    ("xAI Grok",       [r"api\.x\.ai/v\d/chat/completions",
-                        r"api\.x\.ai/v\d/completions"],                    1, 33),
-    ("Fireworks AI",   [r"api\.fireworks\.ai/inference/v\d"],               1, 32),
-    ("Deepseek",       [r"api\.deepseek\.com/v\d"],                         1, 32),
-    ("ElevenLabs",     [r"api\.elevenlabs\.io/v\d/text-to-speech"],         1, 30),
-    ("Stability AI",   [r"api\.stability\.ai/v\d/generation"],              1, 30),
-    # L2 — SDK / package / costruttore
-    ("OpenAI SDK",     [r'"openai"\s*:\s*"\^?\d',
-                        r"/openai@\d+\.\d",
-                        r'from\s+["\']openai["\']',
-                        r'require\(["\']openai["\']'],                     2, 30),
-    ("Anthropic SDK",  [r'"@anthropic-ai/sdk"\s*:\s*"\^?\d',
-                        r"/anthropic@\d+\.\d",
-                        r'from\s+["\']@anthropic-ai/sdk["\']',
-                        r'require\(["\']@anthropic-ai'],                   2, 30),
-    ("LangChain",      [r'"langchain"\s*:\s*"\^?\d',
-                        r'"@langchain/core"\s*:\s*"\^?\d',
-                        r"/langchain@\d+\.\d",
-                        r"/langchain-core@\d+\.\d",
-                        r'from\s+["\']langchain[/"@]',
-                        r'require\(["\']langchain[/"@]'],                  2, 25),
-    ("LlamaIndex",     [r'"llama-index"\s*:\s*"\^?\d',
-                        r'"llama-index-core"\s*:\s*"\^?\d',
-                        r'from\s+["\']llama_index\.',
-                        r'from\s+["\']llama-index'],                       2, 25),
-    ("Vercel AI SDK",  [r'"@ai-sdk/openai"\s*:\s*"\^?\d',
-                        r"/ai@\d+\.\d+\.\d",
-                        r'from\s+["\']@vercel/ai["\']',
-                        r'require\(["\']@vercel/ai["\']'],                 2, 22),
-    ("Hugging Face",   [r'"@huggingface/inference"\s*:\s*"\^?\d',
-                        r'from\s+["\']@huggingface/inference["\']',
-                        r'from transformers import',
-                        r'huggingface\.co/models/[a-zA-Z0-9\-_]+/[a-zA-Z0-9\-_]+'],
-                                                                           2, 22),
-    ("Pinecone",       [r'"@pinecone-database/pinecone"\s*:\s*"\^?\d',
-                        r"/pinecone@\d+\.\d",
-                        r'new Pinecone\(',
-                        r'pinecone\.init\('],                              2, 22),
-    ("Weaviate",       [r'"weaviate-client"\s*:\s*"\^?\d',
-                        r'weaviate\.connect_to',
-                        r'WeaviateClient\('],                              2, 20),
-    ("Qdrant",         [r'"qdrant-client"\s*:\s*"\^?\d',
-                        r'QdrantClient\(',
-                        r'from qdrant_client import'],                     2, 20),
-    ("Chroma",         [r'"chromadb"\s*:\s*"\^?\d',
-                        r'chromadb\.Client\(',
-                        r'new ChromaClient\('],                            2, 18),
-    ("Ollama",         [r'"ollama"\s*:\s*"\^?\d',
-                        r'ollama\.chat\(',
-                        r'ollama\.generate\(',
-                        r'from ollama import'],                            2, 20),
-    ("LiteLLM",        [r'"litellm"\s*:\s*"\^?\d',
-                        r'litellm\.completion\(',
-                        r'import litellm\b'],                              2, 18),
-    ("Haystack",       [r'"haystack-ai"\s*:\s*"\^?\d',
-                        r'from haystack import Pipeline'],                 2, 15),
-    ("CrewAI",         [r'"crewai"\s*:\s*"\^?\d',
-                        r'from crewai import Agent'],                      2, 15),
-    ("AutoGen",        [r'"pyautogen"\s*:\s*"\^?\d',
-                        r'from autogen import AssistantAgent'],            2, 15),
-    ("PyTorch",        [r'"torch"\s*:\s*"\^?\d',
-                        r'import torch\b',
-                        r'cdn\.jsdelivr\.net/npm/torch',
-                        r'"@pytorch/serve"\s*:'],                          2, 15),
-    ("TensorFlow",     [r'"@tensorflow/tfjs"\s*:\s*"\^?\d',
-                        r'import tensorflow as tf',
-                        r'cdn\.jsdelivr\.net/npm/@tensorflow/tfjs'],       2, 15),
-    ("Langfuse",       [r'"langfuse"\s*:\s*"\^?\d',
-                        r'from langfuse import',
-                        r'langfuse\.com/api/public'],                      2, 12),
-    ("OpenAI Embed",   [r'openai\.embeddings\.create',
-                        r'POST.*?/v1/embeddings'],                         2, 20),
+# ── L1: Endpoint API e CDN SDK — solo nel codice sorgente ────────────────────
+# Questi pattern trovano CHIAMATE DIRETTE all'API nel codice JavaScript/Python
+# eseguito dal browser o scritto esplicitamente in script inline/bundle.
+AI_API_SIGNATURES = [
+    # Endpoint REST univoci — non esistono false positive
+    ("OpenAI",         r"api\.openai\.com/v\d+/(chat/completions|embeddings|completions|assistants)"),
+    ("Anthropic",      r"api\.anthropic\.com/v\d+/messages"),
+    ("Google AI",      r"generativelanguage\.googleapis\.com/v\d+/models"),
+    ("Azure OpenAI",   r"openai\.azure\.com/openai/deployments/[^/]+/(chat/completions|completions)"),
+    ("AWS Bedrock",    r"bedrock-runtime\.amazonaws\.com/model/"),
+    ("Cohere",         r"api\.cohere\.(ai|com)/v\d+/(generate|embed|chat|summarize)"),
+    ("Mistral",        r"api\.mistral\.ai/v\d+/(chat/completions|embeddings)"),
+    ("Groq",           r"api\.groq\.com/openai/v\d+/chat/completions"),
+    ("Perplexity",     r"api\.perplexity\.ai/chat/completions"),
+    ("Together AI",    r"api\.together\.(xyz|ai)/v\d+/(chat/completions|completions|inference)"),
+    ("Replicate",      r"api\.replicate\.com/v\d+/predictions"),
+    ("xAI Grok",       r"api\.x\.ai/v\d+/(chat/completions|completions)"),
+    ("Fireworks AI",   r"api\.fireworks\.ai/inference/v\d+/chat/completions"),
+    ("Deepseek",       r"api\.deepseek\.com/v\d+/(chat/completions|completions)"),
+    ("ElevenLabs",     r"api\.elevenlabs\.io/v\d+/text-to-speech"),
+    ("Stability AI",   r"api\.stability\.ai/v\d+/(generation|engines)"),
+    # CDN imports con versione — solo unpkg/jsDelivr/esm.sh (non testo libero)
+    ("OpenAI SDK",     r"(?:unpkg\.com|cdn\.jsdelivr\.net/npm|esm\.sh)/openai@\d"),
+    ("Anthropic SDK",  r"(?:unpkg\.com|cdn\.jsdelivr\.net/npm|esm\.sh)/@anthropic-ai/sdk@\d"),
+    ("TensorFlow.js",  r"(?:unpkg\.com|cdn\.jsdelivr\.net/npm)/@tensorflow/tfjs@\d"),
 ]
 
+# ── L2: Package manager manifests — solo nei JSON embedded nel DOM ────────────
+# webpack/vite/turbopack iniettano il manifest delle dipendenze nel DOM.
+# Pattern: `"nome-package": "^versione"` — disambigua da nomi generici.
+AI_PKG_SIGNATURES = [
+    ("OpenAI SDK",     r'"openai"\s*:\s*"[\^~]?\d+\.\d'),
+    ("Anthropic SDK",  r'"@anthropic-ai/sdk"\s*:\s*"[\^~]?\d+\.\d'),
+    ("LangChain",      r'"(?:langchain|@langchain/core)"\s*:\s*"[\^~]?\d+\.\d'),
+    ("LlamaIndex",     r'"llama-index(?:-core)?"\s*:\s*"[\^~]?\d+\.\d'),
+    ("Vercel AI SDK",  r'"(?:@ai-sdk/openai|@ai-sdk/anthropic|@ai-sdk/google)"\s*:\s*"[\^~]?\d+\.\d'),
+    ("Hugging Face",   r'"@huggingface/inference"\s*:\s*"[\^~]?\d+\.\d'),
+    ("Pinecone",       r'"@pinecone-database/pinecone"\s*:\s*"[\^~]?\d+\.\d'),
+    ("Weaviate",       r'"weaviate-client"\s*:\s*"[\^~]?\d+\.\d'),
+    ("Qdrant",         r'"qdrant-client"\s*:\s*"[\^~]?\d+\.\d'),
+    ("Chroma",         r'"chromadb"\s*:\s*"[\^~]?\d+\.\d'),
+    ("Ollama",         r'"ollama"\s*:\s*"[\^~]?\d+\.\d'),
+    ("LiteLLM",        r'"litellm"\s*:\s*"[\^~]?\d+\.\d'),
+    ("Haystack",       r'"haystack-ai"\s*:\s*"[\^~]?\d+\.\d'),
+    ("CrewAI",         r'"crewai"\s*:\s*"[\^~]?\d+\.\d'),
+    ("AutoGen",        r'"pyautogen"\s*:\s*"[\^~]?\d+\.\d'),
+    ("PyTorch",        r'"torch"\s*:\s*"[\^~]?\d+\.\d'),
+    ("TensorFlow",     r'"@tensorflow/tfjs"\s*:\s*"[\^~]?\d+\.\d'),
+    ("Langfuse",       r'"langfuse"\s*:\s*"[\^~]?\d+\.\d'),
+    ("OpenAI Embed",   r'"openai-embeddings"\s*:\s*"[\^~]?\d+\.\d'),
+]
+
+# ── L2b: Costruttori SDK — solo nei JS bundle scaricati ──────────────────────
+# new OpenAI(), new Anthropic() — inequivocabili anche in codice minificato
+AI_SDK_CONSTRUCTORS = [
+    ("OpenAI SDK",     r'new OpenAI\(\s*\{'),
+    ("Anthropic SDK",  r'new Anthropic\(\s*\{'),
+    ("Pinecone",       r'new Pinecone\(\s*\{'),
+    ("Weaviate",       r'new WeaviateClient\('),
+    ("Qdrant",         r'new QdrantClient\('),
+    ("Chroma",         r'new ChromaClient\('),
+    ("Groq SDK",       r'new Groq\(\s*\{'),
+    ("Mistral SDK",    r'new MistralClient\('),
+    ("ElevenLabs",     r'new ElevenLabsClient\('),
+]
+
+# ── Tech Stack: fingerprint CDN/framework inequivocabili ─────────────────────
 TECH_SIGNATURES = [
-    ("React",      [r"react\.production\.min\.js",
-                    r"react\.development\.js",
-                    r"/react@\d+\.\d",
-                    r"__reactFiber[A-Za-z0-9]",
-                    r'data-reactroot']),
-    ("Next.js",    [r"/_next/static/chunks/",
-                    r"__NEXT_DATA__",
-                    r"/next@\d+\.\d",
-                    r"next/dist/client"]),
-    ("Vue",        [r"vue\.global\.prod\.min\.js",
-                    r"/vue@\d+\.\d",
-                    r"__vue_app__",
-                    r'data-v-app']),
-    ("Angular",    [r'ng-version="\d',
-                    r"/zone\.js@\d+\.\d"]),
-    ("Nuxt",       [r"__NUXT_DATA__",
-                    r"/_nuxt/builds/",
-                    r"/nuxt@\d+\.\d"]),
-    ("Svelte",     [r"/svelte@\d+\.\d",
-                    r"__svelte[A-Za-z]"]),
-    ("Remix",      [r"__remixContext",
-                    r"/build/root-[a-f0-9]+\.js"]),
-    ("Vercel",     [r"\.vercel\.app/",
-                    r"/_vercel/insights/",
-                    r'x-vercel-id']),
-    ("Netlify",    [r"\.netlify\.app/",
-                    r"netlify-identity-widget\.js"]),
-    ("Cloudflare", [r"cdnjs\.cloudflare\.com/ajax/",
-                    r"__cf_bm=",
-                    r"cf-ray:"]),
-    ("AWS",        [r"\.s3\.amazonaws\.com/",
-                    r"\.cloudfront\.net/"]),
-    ("GCP",        [r"\.storage\.googleapis\.com/",
-                    r"\.googlecloud\.com/"]),
-    ("Azure",      [r"\.azurewebsites\.net/",
-                    r"\.blob\.core\.windows\.net/"]),
-    ("Shopify",    [r"cdn\.shopify\.com/s/files/",
-                    r"\.myshopify\.com",
-                    r"Shopify\.theme\b"]),
-    ("Stripe",     [r"js\.stripe\.com/v\d/stripe\.js",
-                    r'Stripe\(["\']pk_']),
-    ("WooCommerce",[r"/wp-content/plugins/woocommerce/",
-                    r"woocommerce-page"]),
-    ("HubSpot",    [r"js\.hs-scripts\.com/\d+\.js",
-                    r"js\.hsforms\.net/"]),
-    ("Intercom",   [r"widget\.intercom\.io/widget/[a-z0-9]+",
-                    r"app\.intercom\.io/auth/"]),
+    ("React",      [r"react\.production\.min\.js", r"/react@\d+\.\d", r"__reactFiber[A-Za-z0-9]", r"data-reactroot"]),
+    ("Next.js",    [r"/_next/static/chunks/", r"__NEXT_DATA__", r"/next@\d+\.\d"]),
+    ("Vue",        [r"vue\.global\.prod\.min\.js", r"/vue@\d+\.\d", r"__vue_app__", r"data-v-app"]),
+    ("Angular",    [r'ng-version="\d', r"/zone\.js@\d+\.\d"]),
+    ("Nuxt",       [r"__NUXT_DATA__", r"/_nuxt/builds/"]),
+    ("Svelte",     [r"/svelte@\d+\.\d", r"__svelte[A-Za-z]"]),
+    ("Remix",      [r"__remixContext", r"/build/root-[a-f0-9]+\.js"]),
+    ("Vercel",     [r"\.vercel\.app", r"/_vercel/insights/", r'x-vercel-id']),
+    ("Netlify",    [r"\.netlify\.app", r"netlify-identity-widget\.js"]),
+    ("Cloudflare", [r"cdnjs\.cloudflare\.com/ajax/", r"__cf_bm=", r"cf-ray:"]),
+    ("AWS",        [r"\.s3\.amazonaws\.com/", r"\.cloudfront\.net/"]),
+    ("GCP",        [r"\.storage\.googleapis\.com/", r"\.googlecloud\.com/"]),
+    ("Azure",      [r"\.azurewebsites\.net/", r"\.blob\.core\.windows\.net/"]),
+    ("Shopify",    [r"cdn\.shopify\.com/s/files/", r"\.myshopify\.com", r"Shopify\.theme\b"]),
+    ("Stripe",     [r"js\.stripe\.com/v\d/stripe\.js", r'Stripe\(["\']pk_']),
+    ("WooCommerce",[r"/wp-content/plugins/woocommerce/", r"woocommerce-page"]),
+    ("HubSpot",    [r"js\.hs-scripts\.com/\d+\.js", r"js\.hsforms\.net/"]),
+    ("Intercom",   [r"widget\.intercom\.io/widget/[a-z0-9]+", r"app\.intercom\.io/auth/"]),
     ("Mixpanel",   [r"cdn4?\.mxpnl\.com/libs/"]),
     ("Amplitude",  [r"cdn\.amplitude\.com/libs/amplitude-\d"]),
-    ("Sentry",     [r"browser\.sentry-cdn\.com/\d",
-                    r"@sentry/browser@\d"]),
-    ("Datadog",    [r"datadoghq-browser-agent\.com/",
-                    r"browser-sdk\.datadoghq\.com/"]),
+    ("Sentry",     [r"browser\.sentry-cdn\.com/\d", r"@sentry/browser@\d"]),
+    ("Datadog",    [r"datadoghq-browser-agent\.com/", r"browser-sdk\.datadoghq\.com/"]),
     ("Segment",    [r"cdn\.segment\.com/analytics\.js/v\d"]),
-    ("PostHog",    [r"app\.posthog\.com/static/array\.js",
-                    r"eu\.posthog\.com/static/array\.js"]),
-    ("WordPress",  [r"/wp-content/themes/[a-zA-Z0-9\-]+/",
-                    r"/wp-includes/js/wp-embed\.",
-                    r"wp-json/wp/v2"]),
-    ("Webflow",    [r"assets\.website-files\.com/[a-f0-9]{24}/",
-                    r"\.webflow\.io/"]),
-    ("Supabase",   [r"supabase\.co/rest/v1",
-                    r'"@supabase/supabase-js"\s*:\s*"\^?\d']),
-    ("Firebase",   [r"firebase\.googleapis\.com/v\d",
-                    r"firebaseapp\.com/__/auth"]),
-    ("Tailwind",   [r"cdn\.tailwindcss\.com",
-                    r"tailwindcss@\d+\.\d"]),
+    ("PostHog",    [r"(?:app|eu)\.posthog\.com/static/array\.js"]),
+    ("WordPress",  [r"/wp-content/themes/[a-zA-Z0-9\-_]+/", r"/wp-includes/js/wp-embed\.", r"wp-json/wp/v2"]),
+    ("Webflow",    [r"assets\.website-files\.com/[a-f0-9]{24}/", r"\.webflow\.io/"]),
+    ("Supabase",   [r"supabase\.co/rest/v1", r'"@supabase/supabase-js":\s*"[\^~]?\d']),
+    ("Firebase",   [r"firebase\.googleapis\.com/v\d", r"firebaseapp\.com/__/auth"]),
+    ("Tailwind",   [r"cdn\.tailwindcss\.com", r"tailwindcss@\d+\.\d"]),
+    ("Prisma",     [r'"@prisma/client":\s*"[\^~]?\d']),
+]
+
+# ── L3: Tool names in pagine tecnico-editoriali NON-news ─────────────────────
+# Cerca SOLO nomi di tool specifici (non acronimi generici).
+# Pattern applicato SOLO a pagine /engineering, /stack, /tech-stack, /about/technology
+# NON su /technology (pagina categoria notizie sui siti di news).
+AI_TECH_PAGE_PATTERNS = [
+    # Tool inequivocabili — il solo nome è sufficiente in una pagina /stack
+    ("LangChain",        r"\bLangChain\b"),
+    ("LlamaIndex",       r"\bLlamaIndex\b|\bllama[_\-]index\b"),
+    ("AWS Bedrock",      r"\bAWS\s+Bedrock\b"),
+    ("Azure OpenAI",     r"\bAzure\s+OpenAI\b"),
+    ("Hugging Face",     r"\bHuggingFace\b|\bHugging\s+Face\s+(?:Hub|Transformers|Inference)\b"),
+    ("Pinecone",         r"\bPinecone\b"),
+    ("Weaviate",         r"\bWeaviate\b"),
+    ("Qdrant",           r"\bQdrant\b"),
+    ("Chroma",           r"\bChromaDB\b"),
+    ("Ollama",           r"\bOllama\b"),
+    ("MLflow",           r"\bMLflow\b"),
+    ("Kubeflow",         r"\bKubeflow\b"),
+    ("Ray Serve",        r"\bRay\s+Serve\b|\bAnyscale\b"),
+    ("PyTorch",          r"\bPyTorch\b"),
+    ("TensorFlow",       r"\bTensorFlow\b"),
+    ("LiteLLM",          r"\bLiteLLM\b"),
+    ("CrewAI",           r"\bCrewAI\b"),
+    ("AutoGen",          r"\bAutoGen\b|\bpyautogen\b"),
+    # AI API — solo se esplicitamente citata come integrazione tecnica
+    ("OpenAI API",       r"\bOpenAI\s+API\b|\bOpenAI\s+SDK\b"),
+    ("Anthropic API",    r"\bAnthropic\s+(?:API|Claude)\s+API\b"),
+    ("Google Gemini API",r"\bGemini\s+API\b|\bVertex\s+AI\b"),
+    # Infra AI specifica
+    ("RAG",              r"\bRAG\b|\bRetrieval[- ]Augmented\s+Generation\b"),
+    ("Vector DB",        r"\bvector\s+(?:database|store|DB)\b|\bvectordb\b"),
+    ("Fine-tuning",      r"\bfine[- ]tun(?:ing|ed?)\s+(?:models?|LLMs?|transformers?)\b"),
 ]
 
 EXCLUDE_DOMAINS = {
@@ -287,6 +273,13 @@ EXCLUDE_DOMAINS = {
     "wp.com","wordpress.com","blogspot.com","tumblr.com","medium.com",
 }
 
+# Pagine di news/media — su questi domini /technology è editoriale, non tecnico
+NEWS_DOMAINS = re.compile(
+    r'ibtimes|techcrunch|wired|verge|engadget|cnet|zdnet|mashable|'
+    r'businessinsider|forbes|bloomberg|reuters|wsj|nytimes|theguardian|'
+    r'bbc\.co|cnbc|huffpost|dailymail|newsweek|time\.com',
+    re.IGNORECASE
+)
 
 def normalize_domain(url: str) -> str:
     if not url: return ""
@@ -297,61 +290,83 @@ def normalize_domain(url: str) -> str:
     except Exception:
         return url.lower().strip()
 
-
 def domain_to_name(domain: str) -> str:
     name = domain.split(".")[0]
     return re.sub(r"[-_]", " ", name).title()
 
-
 def extract_text(html: str) -> str:
-    """Solo per hiring signals — NON per detection AI/tech."""
-    text = re.sub(r'<style[^>]*>.*?</style>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'<script[^>]*>.*?</script>', ' ', text, flags=re.DOTALL | re.IGNORECASE)
+    """Testo visibile — solo per hiring signals in calc_scores."""
+    text = re.sub(r'<style[^>]*>.*?</style>', ' ', html, flags=re.DOTALL|re.IGNORECASE)
+    text = re.sub(r'<script[^>]*>.*?</script>', ' ', text, flags=re.DOTALL|re.IGNORECASE)
     text = re.sub(r'<[^>]+>', ' ', text)
     return re.sub(r'\s+', ' ', text).lower()
 
-
 def _build_code_corpus(html: str, js_bundles: list) -> str:
-    """Corpus di codice sorgente: script inline, URL CDN, JSON embedded, JS bundle."""
+    """
+    Corpus di CODICE da analizzare per L1 (API) e L1b (CDN imports).
+    Include: script inline, URL src/href, JSON embedded SPA, bundle JS.
+    Esclude: testo visibile della pagina.
+    """
     sections = []
     # Script inline
-    for m in re.finditer(r'<script[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE):
+    for m in re.finditer(r'<script[^>]*>(.*?)</script>', html, re.DOTALL|re.IGNORECASE):
         sections.append(m.group(1))
-    # URL attributi
+    # URL negli attributi (CDN fingerprint)
     for m in re.finditer(r'(?:src|href|data-src)\s*=\s*["\']([^"\']{5,})["\']', html, re.IGNORECASE):
         sections.append(m.group(1))
-    # JSON embedded SPA
-    for pat in [r'__NEXT_DATA__\s*=\s*(\{.{20,}?\})\s*[;<]',
-                r'__NUXT_DATA__\s*=\s*(\[.{20,}?\])\s*[;<]',
-                r'__NUXT__\s*=\s*(\{.{20,}?\})\s*[;<]',
-                r'__remixContext\s*=\s*(\{.{20,}?\})\s*[;<]',
-                r'window\.__APP_STATE__\s*=\s*(\{.{20,}?\})\s*[;<]',
-                r'window\.__INITIAL_STATE__\s*=\s*(\{.{20,}?\})\s*[;<]']:
+    # JSON embedded SPA (webpack/vite manifest + app state)
+    for pat in [
+        r'__NEXT_DATA__\s*=\s*(\{.{20,}?\})\s*[;<]',
+        r'__NUXT_DATA__\s*=\s*(\[.{20,}?\])\s*[;<]',
+        r'__NUXT__\s*=\s*(\{.{20,}?\})\s*[;<]',
+        r'__remixContext\s*=\s*(\{.{20,}?\})\s*[;<]',
+        r'window\.__APP_STATE__\s*=\s*(\{.{20,}?\})\s*[;<]',
+        r'window\.__INITIAL_STATE__\s*=\s*(\{.{20,}?\})\s*[;<]',
+        r'"dependencies"\s*:\s*(\{[^}]{10,}\})',   # package.json dependencies
+    ]:
         for m in re.finditer(pat, html, re.DOTALL):
-            sections.append(m.group(1)[:10000])
+            sections.append(m.group(1)[:12000])
     # JS bundle
     for bundle in js_bundles:
-        sections.append(bundle[:40000])
+        sections.append(bundle[:50000])
     return " ".join(sections)
 
 
 def detect(html: str, js_bundles: list) -> tuple:
-    """Detection v8 — solo L1 (endpoint) e L2 (SDK/package) nel codice."""
+    """
+    Detection v9 — tre livelli nel codice sorgente.
+    Nessun falso positivo da testo editoriale.
+    """
     corpus = _build_code_corpus(html, js_bundles)
     ai_found, tech_found = [], []
-    for name, patterns, level, weight in AI_SIGNATURES:
-        if level > 2:
-            continue
-        for pat in patterns:
-            try:
-                if re.search(pat, corpus, re.IGNORECASE):
-                    key = name.lower().replace(" ", "")
-                    if key not in PRODUCTIVITY_BLACKLIST and name not in ai_found:
-                        ai_found.append(name)
-                    break
-            except re.error:
-                continue
-    full = html + " " + " ".join(js_bundles[:3])
+
+    # L1: endpoint API
+    for name, pat in AI_API_SIGNATURES:
+        try:
+            if re.search(pat, corpus, re.IGNORECASE) and name not in ai_found:
+                ai_found.append(name)
+        except re.error:
+            pass
+
+    # L2: package manifest
+    for name, pat in AI_PKG_SIGNATURES:
+        try:
+            if re.search(pat, corpus, re.IGNORECASE) and name not in ai_found:
+                ai_found.append(name)
+        except re.error:
+            pass
+
+    # L2b: costruttori SDK (solo nei bundle)
+    bundle_text = " ".join(js_bundles[:5])
+    for name, pat in AI_SDK_CONSTRUCTORS:
+        try:
+            if re.search(pat, bundle_text, re.IGNORECASE) and name not in ai_found:
+                ai_found.append(name)
+        except re.error:
+            pass
+
+    # Tech stack
+    full = html + " " + bundle_text
     for name, patterns in TECH_SIGNATURES:
         for pat in patterns:
             try:
@@ -359,8 +374,26 @@ def detect(html: str, js_bundles: list) -> tuple:
                     tech_found.append(name)
                     break
             except re.error:
-                continue
+                pass
+
     return ai_found, tech_found
+
+
+def detect_from_tech_page(text: str, domain: str) -> list:
+    """
+    Cerca tool AI specifici nel testo di pagine tecnico/engineering.
+    NON usare su domini news/media o su pagine /technology.
+    """
+    if NEWS_DOMAINS.search(domain):
+        return []
+    found = []
+    for name, pat in AI_TECH_PAGE_PATTERNS:
+        try:
+            if re.search(pat, text, re.IGNORECASE) and name not in found:
+                found.append(name)
+        except re.error:
+            pass
+    return found
 
 
 def calc_scores(ai_stack: list, tech_stack: list, text: str) -> dict:
@@ -368,14 +401,14 @@ def calc_scores(ai_stack: list, tech_stack: list, text: str) -> dict:
     cloud  = sum(1 for t in tech_stack if t in {"AWS","GCP","Azure","Cloudflare","Vercel"})
     dev    = sum(1 for t in tech_stack if t in {"React","Next.js","Vue","Angular","Nuxt","Svelte","Remix"})
     hiring = sum(1 for kw in ["machine learning engineer","ai engineer","llm engineer",
-                               "ml engineer","data scientist"] if kw in text)
+                               "ml engineer","data scientist","ai researcher"] if kw in text)
     def clamp(v): return min(100.0, max(0.0, float(v)))
     return {
         "ai_score":         clamp(ai_n * 15),
         "maturity_score":   clamp(ai_n * 12 + cloud * 8 + dev * 5 + len(tech_stack) * 2),
         "cloud_score":      clamp(cloud * 25),
         "automation_score": clamp(sum(1 for t in ai_stack if t in
-                                   {"LangChain","LlamaIndex","CrewAI","AutoGen","Haystack"}) * 25),
+                                   {"LangChain","LlamaIndex","CrewAI","AutoGen","Haystack","Ray Serve"}) * 25),
         "developer_score":  clamp(dev * 15 + cloud * 5),
         "security_score":   clamp(cloud * 20),
         "growth_score":     clamp(hiring * 20),
@@ -398,7 +431,7 @@ async def fetch(session, url: str, timeout: int = 12) -> str:
     try:
         async with session.get(url, headers=HEADERS,
                                timeout=aiohttp.ClientTimeout(total=timeout),
-                               allow_redirects=True, max_redirects=4) as r:
+                               allow_redirects=True, max_redirects=5) as r:
             if r.status == 200:
                 ct = r.headers.get("Content-Type", "")
                 if "text" in ct or "javascript" in ct or "json" in ct:
@@ -408,26 +441,15 @@ async def fetch(session, url: str, timeout: int = 12) -> str:
     return ""
 
 
-# ── Web Scanner — strategia multi-sorgente ────────────────────────────────────
-# REALTÀ: L'AI stack NON appare mai nei JS bundle frontend dei siti enterprise.
-# Vive nel backend (Python/Node server-side).
-# DOVE trovarlo davvero:
-#   1. Bundle JS (per app che usano AI widget/chat nel browser — raro ma reale)
-#   2. Pagine /about, /technology, /careers/jobs (hiring signals tecnici)
-#   3. HTTP headers (x-powered-by, server) e meta tag
-#   4. package.json se esposto pubblicamente (/package.json)
-# TECH STACK: rilevabile al 100% da homepage (CDN fingerprint, script src, cookie names)
-
 async def fetch_js_bundles(session, html: str, base_url: str) -> list:
     """
-    Scarica bundle JS in parallelo. Tutti i bundle senza filtro nome
-    (i nomi hash non danno info — scarichiamo e cerchiamo nel contenuto).
-    Skip solo: analytics/ads/font/polyfill.
+    Scarica bundle JS in parallelo — tutti tranne analytics/font/ads.
+    Costruisce URL assoluti correttamente (path relativo → origin + path).
     """
     SKIP = re.compile(
         r'analytics|gtm|gtag|fbq|pixel|hotjar|clarity|mouseflow|'
-        r'fonts?\.google|typekit|adobe|font|icon|emoji|polyfill|'
-        r'recaptcha|turnstile|cookie-?consent|gdpr|adsbygoogle',
+        r'fonts?\.(?:google|gstatic)|typekit|font|icon|emoji|polyfill|'
+        r'recaptcha|turnstile|consent|gdpr|adsbygoogle|adsense',
         re.IGNORECASE
     )
     try:
@@ -443,81 +465,52 @@ async def fetch_js_bundles(session, html: str, base_url: str) -> list:
     ):
         raw = m.group(1)
         full = raw if raw.startswith("http") else origin + raw
-        base_full = full.split("?")[0]
+        base_full = full.split("?")[0]  # dedup senza querystring
         if base_full not in seen and not SKIP.search(full):
             seen.add(base_full)
-            js_urls.append(full)
+            js_urls.append(full)  # scarica con querystring per validità CDN
 
     # Scarica fino a 8 bundle in parallelo
-    async def get_bundle(url):
-        return await fetch(session, url, timeout=7)
-
-    tasks = [get_bundle(u) for u in js_urls[:10]]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    bundles = [r for r in results if isinstance(r, str) and r][:8]
-    return bundles
+    tasks = [fetch(session, u, timeout=7) for u in js_urls[:10]]
+    raw = await asyncio.gather(*tasks, return_exceptions=True)
+    return [r for r in raw if isinstance(r, str) and r][:8]
 
 
-async def fetch_extra_pages(session, base_url: str) -> str:
+async def fetch_tech_pages(session, base_url: str, domain: str) -> str:
     """
-    Scarica SOLO pagine hiring (/careers, /jobs) per trovare segnali AI tecnici
-    nelle offerte di lavoro. NON include /technology o /about perché
-    queste pagine su siti di news contengono articoli su AI che generano falsi positivi.
+    Scarica pagine tecnico-editoriali NON-news per L3 detection.
+    Pagine incluse: /engineering, /stack, /tech-stack, /about/technology,
+                    /careers/engineering (ATS esterni seguiti via redirect)
+    Pagine ESCLUSE: /technology (editoriale news), /blog, /news
     """
+    if NEWS_DOMAINS.search(domain):
+        return ""   # Nessuna extra page per siti di news
+
     p = urlparse(base_url)
     origin = f"{p.scheme}://{p.netloc}"
     pages = [
-        f"{origin}/careers",
+        f"{origin}/engineering",
+        f"{origin}/stack",
+        f"{origin}/tech-stack",
+        f"{origin}/about/technology",
+        f"{origin}/about/engineering",
+        f"{origin}/careers",        # ATS con redirect consentito (max_redirects=5)
         f"{origin}/jobs",
-        f"{origin}/open-roles",
-        f"{origin}/work-with-us",
-        f"{origin}/package.json",   # esposto su alcune startup
     ]
-    tasks = [fetch(session, url, timeout=6) for url in pages]
+    tasks = [fetch(session, url, timeout=7) for url in pages]
     results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Filtra solo pagine con contenuto tecnico reale (non 404 redirect su homepage)
     texts = []
     for r in results:
-        if isinstance(r, str) and r:
-            # Prendi solo i job listing — cerca sezioni con parole chiave hiring
-            if re.search(r'(?:job|career|engineer|developer|position|role|opening)', r, re.I):
-                texts.append(r[:30000])
+        if not isinstance(r, str) or not r:
+            continue
+        # Scarta se la pagina è chiaramente la homepage redirettata (stessa struttura)
+        # o se è troppo corta (404 page)
+        clean = re.sub(r'<[^>]+>', ' ', r)
+        if len(clean.strip()) > 500:
+            texts.append(clean[:20000])
     return " ".join(texts)
-
-
-# Pattern AI per hiring pages — obbligatoriamente in contesto tecnico/lavorativo.
-# "\bOpenAI API\b" è inequivocabile (nome tool specifico, non "OpenAI" da solo).
-# "\bLLM\b" non è incluso da solo perché appare in news/blog — lo cerchiamo
-# solo quando accompagnato da contesto hiring ("engineer", "experience with").
-AI_JOBS_PATTERNS = [
-    # Tool specifici — inequivocabili anche fuori contesto
-    ("LangChain",        r"\bLangChain\b"),
-    ("LlamaIndex",       r"\bLlamaIndex\b|\bllama[_-]index\b"),
-    ("AWS Bedrock",      r"\bAWS\s+Bedrock\b"),
-    ("Azure OpenAI",     r"\bAzure\s+OpenAI\b"),
-    ("Hugging Face",     r"\bHuggingFace\b|\bHugging\s+Face\s+(?:Hub|Transformers|Inference)"),
-    ("Pinecone",         r"\bPinecone\b"),
-    ("Weaviate",         r"\bWeaviate\b"),
-    ("Qdrant",           r"\bQdrant\b"),
-    ("Ollama",           r"\bOllama\b"),
-    ("MLflow",           r"\bMLflow\b"),
-    ("Kubeflow",         r"\bKubeflow\b"),
-    ("Ray",              r"\bRay\s+Serve\b|\bAnyscale\b"),
-    # API con contesto tecnico richiesto (non "We use OpenAI" ma "OpenAI API experience")
-    ("OpenAI API",       r"(?:experience|proficiency|knowledge|working)\s+(?:with\s+)?(?:the\s+)?OpenAI\s+API"
-                         r"|OpenAI\s+API\s+(?:integration|experience|key)"),
-    ("Anthropic Claude", r"(?:experience|proficiency)\s+(?:with\s+)?Anthropic"
-                         r"|Claude\s+API"),
-    # RAG/vector solo in contesto engineering
-    ("RAG",              r"(?:build|implement|experience\s+with)\s+RAG"
-                         r"|\bRetrieval.Augmented\s+Generation\b"),
-    ("Vector DB",        r"(?:experience|working)\s+with\s+(?:a\s+)?vector\s+(?:database|store)"
-                         r"|\bvectordb\b"),
-    # Fine-tuning/MLOps solo in contesto ingegneristico
-    ("Fine-tuning",      r"(?:fine.tun(?:ing|ed?)\s+(?:LLMs?|models?|transformers?)"
-                         r"|experience\s+(?:with\s+)?fine.tuning)"),
-    ("PyTorch",          r"\bPyTorch\b"),
-    ("TensorFlow",       r"\bTensorFlow\b"),
-]
 
 
 async def scan_domain(session, row: dict) -> dict | None:
@@ -529,31 +522,30 @@ async def scan_domain(session, row: dict) -> dict | None:
     if not html:
         html = await fetch(session, website.rstrip("/") + "/")
     if not html.strip():
-        return {"domain": domain,
-                "scan_errors": (row.get("scan_errors") or 0) + 1,
-                "last_scan_date": datetime.now(timezone.utc)}
+        return {
+            "domain": domain,
+            "scan_errors": (row.get("scan_errors") or 0) + 1,
+            "last_scan_date": datetime.now(timezone.utc),
+        }
 
-    # 2. Bundle JS + extra pages in parallelo
-    js_bundles, extra_text = await asyncio.gather(
+    # 2. Bundle JS + pagine tech in parallelo
+    js_bundles, tech_page_text = await asyncio.gather(
         fetch_js_bundles(session, html, website),
-        fetch_extra_pages(session, website),
+        fetch_tech_pages(session, website, domain),
     )
 
-    # 3. AI da codice (bundle JS + script inline + CDN URLs)
+    # 3. L1+L2: detection da codice (endpoint API, CDN imports, manifest, bundle)
     ai_from_code, tech_stack = detect(html, js_bundles)
 
-    # 4. AI da hiring pages (pattern contestuali)
-    ai_from_jobs = []
-    if extra_text:
-        for name, pat in AI_JOBS_PATTERNS:
-            if re.search(pat, extra_text, re.IGNORECASE) and name not in ai_from_jobs:
-                ai_from_jobs.append(name)
+    # 4. L3: detection da pagine tech/engineering (tool names specifici)
+    ai_from_pages = detect_from_tech_page(tech_page_text, domain) if tech_page_text else []
 
-    # Merge: codice prima (certezza), poi hiring (segnale)
-    ai_stack = list(dict.fromkeys(ai_from_code + [t for t in ai_from_jobs if t not in ai_from_code]))
+    # Merge: codice prima (più affidabile), poi pagine tech
+    ai_stack = list(dict.fromkeys(ai_from_code + [t for t in ai_from_pages if t not in ai_from_code]))
 
-    text = extract_text(html)
-    scores = calc_scores(ai_stack, tech_stack, text)
+    # 5. Scores
+    visible_text = extract_text(html)
+    scores = calc_scores(ai_stack, tech_stack, visible_text)
 
     return {
         "domain":         domain,
@@ -562,6 +554,7 @@ async def scan_domain(session, row: dict) -> dict | None:
         "last_scan_date": datetime.now(timezone.utc),
         **scores,
     }
+
 
 # ── PostgreSQL helpers ─────────────────────────────────────────────────────────
 async def ensure_schema(pool):
