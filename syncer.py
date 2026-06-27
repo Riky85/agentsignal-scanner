@@ -53,19 +53,26 @@ def build_payload(r):
         "name":                    sstr(r.get("name")) or r["domain"].split(".")[0].title(),
         "website":                 sstr(r.get("website")) or "https://" + r["domain"],
         "source":                  sstr(r.get("source")) or "railway",
+
+        # Stack tecnologico (Technology & Business Intelligence v10)
+        "ai_stack":                sj(r.get("ai_stack"), []),
+        "tech_stack":              sj(r.get("tech_stack"), []),
+        "technology_dna":          sj(r.get("technology_dna"), {}),
+        "ats_documentation":       sstr(r.get("ats_documentation")),
+        "ats_product_signals":     sj(r.get("ats_product_signals"), []),
+        "ats_recent_changes":      sstr(r.get("ats_documentation")),
+
+        # Org chart (people con ruoli)
+        "org_chart":               org,
+
+        # Enrichment fields
         "description":             sstr(r.get("description")),
         "industry":                sstr(r.get("industry")),
         "country":                 sstr(r.get("country")),
         "logo_url":                sstr(r.get("logo_url")),
+        "linkedin_url":            sstr(r.get("linkedin_url")),
         "employee_count":          int(r["employee_count"]) if r.get("employee_count") else None,
         "revenue_range":           sstr(r.get("revenue_range")),
-
-        # Stack tecnologico
-        "ai_stack":                sj(r.get("ai_stack"), []),
-        "tech_stack":              sj(r.get("tech_stack"), []),
-
-        # Org chart (people con ruoli)
-        "org_chart":               org,
 
         # Scores AI & digitali
         "ai_adoption_score":       sfloat(r.get("ai_score")),
@@ -170,10 +177,14 @@ async def load_batch(pool):
     async with pool.acquire() as c:
         rows = await c.fetch("""
             SELECT id, domain, name, website, source, global_rank,
-                   ai_stack, tech_stack, ai_score, maturity_score,
+                   ai_stack, tech_stack, biz_stack, technology_dna,
+                   ai_score, maturity_score,
                    cloud_score, automation_score, developer_score,
                    security_score, growth_score, innovation_score,
                    intent_score, commerce_score, tech_gap_score,
+                   description, industry, employee_count, revenue_range,
+                   country, logo_url, linkedin_url, org_chart,
+                   ats_documentation, ats_product_signals,
                    base44_id, last_scan_date, last_push_date
             FROM companies
             WHERE last_scan_date IS NOT NULL
