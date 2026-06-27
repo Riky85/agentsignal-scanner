@@ -6,6 +6,8 @@
   "deploy": {
     "startCommand": "python3 -u scanner.py",
     "restartPolicyType": "ALWAYS",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyMaxRetries": 10,
+    "healthcheckPath": "/",
+    "healthcheckTimeout": 60
   }
 }
