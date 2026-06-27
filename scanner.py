@@ -1174,14 +1174,29 @@ async def scan_domain(session, row: dict) -> dict | None:
         fetch_tech_pages(session, website, domain),
     )
 
-    # Step 3: Detection
-    ai_stack   = detect_ai(html, bundles, pkg_json, tech_text, domain)
-    biz_stack  = detect_biz(html, bundles)
-    tech_stack = detect_tech(html, bundles)
+    # Step 3: Detection — Technology & Business Intelligence v10
+    from engine_v10_final import detect_tech_dna, detect_ai_signals, compute_digital_maturity, build_technology_dna_summary
 
-    # Step 4: Scores
-    visible_text = extract_text(html)
-    scores = calc_scores(ai_stack, biz_stack, tech_stack, visible_text)
+    tech_dna    = detect_tech_dna(html, bundles)
+    ai_signals  = detect_ai_signals({
+        "careers":  await _safe_fetch(session, website + "/careers"),
+        "jobs":     await _safe_fetch(session, website + "/jobs"),
+        "blog":     await _safe_fetch(session, website + "/blog"),
+        "product":  await _safe_fetch(session, website + "/product"),
+        "features": await _safe_fetch(session, website + "/features"),
+    })
+
+    # Compatibilità legacy: ai_stack = segnali AI come lista
+    ai_stack   = [s["signal"] for s in ai_signals[:8]]
+    # tech_stack = tutte le tecnologie rilevate flatten
+    tech_stack = [t for tools in tech_dna.values() for t in tools]
+    biz_stack  = tech_dna  # dizionario per categoria
+
+    # Step 4: Scores — Digital Maturity Intelligence
+    scores = compute_digital_maturity(tech_dna, ai_signals)
+
+    # Summary per ats_documentation
+    dna_summary = build_technology_dna_summary(tech_dna, ai_signals)
 
     # Step 5: Company enrichment (description, CEO, revenue, founded)
     try:
@@ -1191,17 +1206,19 @@ async def scan_domain(session, row: dict) -> dict | None:
         enrichment = {}
 
     return {
-        "domain":         domain,
-        "ai_stack":       json.dumps(ai_stack),
-        "tech_stack":     json.dumps(tech_stack),
-        "biz_stack":      json.dumps(biz_stack),
-        "description":    enrichment.get("description") or None,
-        "industry":       enrichment.get("industry") or None,
-        "founded_year":   enrichment.get("founded_year") or None,
-        "org_chart":      enrichment.get("org_chart") or None,
-        "logo_url":       enrichment.get("logo_url") or None,
-        "linkedin_url":   enrichment.get("linkedin_url") or None,
-        "last_scan_date": datetime.now(timezone.utc),
+        "domain":              domain,
+        "ai_stack":            json.dumps(ai_stack),   # AI signals come stringhe
+        "tech_stack":          json.dumps(tech_stack), # Tutte le tech rilevate
+        "technology_dna":      json.dumps(tech_dna),   # Dizionario per categoria
+        "ats_documentation":   dna_summary,            # Report leggibile
+        "ats_product_signals": json.dumps(ai_signals[:5]),  # AI signals dettagliati
+        "description":         enrichment.get("description") or None,
+        "industry":            enrichment.get("industry") or None,
+        "founded_year":        enrichment.get("founded_year") or None,
+        "org_chart":           enrichment.get("org_chart") or None,
+        "logo_url":            enrichment.get("logo_url") or None,
+        "linkedin_url":        enrichment.get("linkedin_url") or None,
+        "last_scan_date":      datetime.now(timezone.utc),
         **scores,
     }
 
