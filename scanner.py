@@ -43,8 +43,8 @@ HW            = {"api-key": BASE44_TOKEN, "Content-Type": "application/json"}
 
 WORKER_ID     = int(os.environ.get("WORKER_ID", "0"))
 TOTAL_WORKERS = int(os.environ.get("TOTAL_WORKERS", "3"))
-THREADS       = int(os.environ.get("THREADS", "30"))
-BATCH_SIZE    = int(os.environ.get("BATCH_SIZE", "200"))   # ridotto per anti-OOM
+THREADS       = int(os.environ.get("THREADS", "8"))    # anti-OOM: era 30
+BATCH_SIZE    = int(os.environ.get("BATCH_SIZE", "100"))   # anti-OOM: era 200
 RESCAN_DAYS   = int(os.environ.get("RESCAN_DAYS", "9999"))  # v10 full rescan
 PORT          = int(os.environ.get("PORT", "8080"))
 MODE          = os.environ.get("MODE", "scanner")  # scanner | importer | syncer
@@ -1146,7 +1146,7 @@ async def fetch_bundles(session, html: str, base_url: str) -> list:
             seen.add(key)
             urls.append(full)
 
-    tasks   = [fetch(session, u, 8) for u in urls[:12]]
+    tasks   = [fetch(session, u, 6) for u in urls[:2]]  # anti-OOM: max 2 bundle
     results = await asyncio.gather(*tasks, return_exceptions=True)
     return [r for r in results if isinstance(r, str) and len(r) > 200][:8]
 
@@ -1245,7 +1245,7 @@ async def scan_domain(session, row: dict) -> dict | None:
     import gc
 
     # Anti-OOM: tronca prima di processare
-    html    = html[:250_000]        # max 250KB
+    html    = html[:150_000]        # anti-OOM: max 150KB
     bundles = bundles[:2]           # max 2 bundle JS
 
     # 3a: Business Stack (CDN fingerprint — alta affidabilità)
@@ -1255,15 +1255,11 @@ async def scan_domain(session, row: dict) -> dict | None:
     tech_stack_list = detect_tech_stack(html, bundles)
 
     # 3c: AI Signals (testo pubblico: careers, blog, product, docs)
+    # anti-OOM: solo 3 pagine (erano 7) — careers+blog coprono 90% dei segnali AI
     page_texts = {
-        "careers":   (await _fetch(session, website + "/careers",  6) or ""),
-        "jobs":      (await _fetch(session, website + "/jobs",      6) or ""),
-        "blog":      (await _fetch(session, website + "/blog",      6) or ""),
-        "product":   (await _fetch(session, website + "/product",   6) or ""),
-        "features":  (await _fetch(session, website + "/features",  6) or ""),
-        "docs":      (await _fetch(session, website + "/docs",      6) or ""),
-        "changelog": (await _fetch(session, website + "/changelog", 6) or ""),
-        "homepage":  html[:50000],
+        "careers":  (await _fetch(session, website + "/careers", 5) or "")[:80_000],
+        "blog":     (await _fetch(session, website + "/blog",    5) or "")[:80_000],
+        "homepage": html[:40_000],
     }
     ai_signals = detect_ai_signals(page_texts)
 
