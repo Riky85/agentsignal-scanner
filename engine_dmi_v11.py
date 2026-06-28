@@ -643,13 +643,76 @@ def build_tech_dna(biz_stack: dict, tech_stack: list) -> dict:
     return dna
 
 
+# ── Normalizzazione nomi tool — dedup varianti dello stesso brand ─────────────
+_TECH_CANONICAL = {
+    # Shopify variants
+    "shopify plus":           "Shopify",
+    "shopify payments":       "Shopify",
+    # Stripe variants
+    "stripe payments":        "Stripe",
+    "stripe checkout":        "Stripe",
+    "stripe billing":         "Stripe",
+    # HubSpot variants
+    "hubspot":                "HubSpot",
+    "hubspot crm":            "HubSpot",
+    "hubspot integration":    "HubSpot",
+    "hubspot marketing":      "HubSpot",
+    # Salesforce variants
+    "salesforce crm":         "Salesforce",
+    "salesforce integration": "Salesforce",
+    "salesforce sales cloud": "Salesforce",
+    # AWS SageMaker variants
+    "amazon sagemaker":       "AWS SageMaker",
+    "aws sagemaker studio":   "AWS SageMaker",
+    "sagemaker":              "AWS SageMaker",
+    # n8n
+    "n8n.io":                 "n8n",
+    # Google Analytics variants
+    "google analytics 4":     "Google Analytics",
+    "google analytics":       "Google Analytics",
+    "ga4":                    "Google Analytics",
+    # Braintree (owned by PayPal)
+    "braintree payments":     "Braintree",
+    # Zendesk variants
+    "zendesk support":        "Zendesk",
+    "zendesk chat":           "Zendesk",
+    # Intercom variants
+    "intercom messenger":     "Intercom",
+    # Zapier variants
+    "zapier automation":      "Zapier",
+    # Make variants
+    "make.com":               "Make",
+    "integromat":             "Make",
+    # ActiveCampaign
+    "activecampaign crm":     "ActiveCampaign",
+    # Monday
+    "monday.com":             "Monday",
+    # Next.js
+    "next.js":                "Next.js",
+    "nextjs":                 "Next.js",
+}
+
+def _normalize_tech(name: str) -> str:
+    """Normalizza nome tool → forma canonica (es. 'Hubspot' → 'HubSpot')."""
+    return _TECH_CANONICAL.get(name.lower().strip(), name.strip())
+
+
 def build_flat_tech_list(biz_stack: dict, tech_stack: list) -> list:
-    """Lista piatta di tutti i tool rilevati — per Base44 tech_stack field."""
-    tools = []
+    """Lista piatta normalizzata di tutti i tool rilevati — dedup per nome canonico."""
+    raw = []
     for cat_tools in biz_stack.values():
-        tools.extend(cat_tools)
-    tools.extend(tech_stack)
-    return list(dict.fromkeys(tools))  # dedup mantenendo ordine
+        raw.extend(cat_tools)
+    raw.extend(tech_stack)
+    # Normalizza e dedup (case-insensitive, mantiene primo occorrenza)
+    seen_lower = set()
+    result = []
+    for t in raw:
+        canonical = _normalize_tech(t)
+        key = canonical.lower()
+        if key not in seen_lower:
+            seen_lower.add(key)
+            result.append(canonical)
+    return result
 
 
 def build_buying_intent_signals(ai_signals: list) -> list:
