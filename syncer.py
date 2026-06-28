@@ -69,8 +69,10 @@ def build_payload(r):
         "employee_count":         int(r["employee_count"]) if r.get("employee_count") else None,
         "revenue_range":          sstr(r.get("revenue_range")),
         "global_rank":            int(r["global_rank"]) if r.get("global_rank") else None,
-        "ai_stack":               ai,
-        "tech_stack":             ts,
+        "ai_stack":               ts,   # tool tecnologici: Shopify, Stripe, React...
+        "tech_stack":             ts,   # stesso (doppio campo per compatibilità UI)
+        "buying_intent_signals":  _list(r.get("buying_intent_signals")),  # segnali AI leggibili
+        "acquisition_signals":    _list(r.get("acquisition_signals")),    # gap tecnologici
         "org_chart":              org,
         "ai_adoption_score":      sint(r.get("ai_score") or r.get("ai_readiness") or 0),
         "ai_maturity_score":      min(5, sint(r.get("maturity_score") or r.get("digital_maturity") or 0) // 20),
