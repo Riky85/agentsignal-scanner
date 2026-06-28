@@ -2158,6 +2158,22 @@ async def healthcheck(pool):
 async def main():
     log.info(f"AgentSignal v6.0 | worker={WORKER_ID} | mode={MODE}")
 
+    # MODE=disabled → solo healthcheck, zero scanning (anti-OOM per worker instabili)
+    if MODE == "disabled":
+        log.info(f"[W={WORKER_ID}] DISABLED MODE — solo healthcheck attivo, nessun scan")
+        PORT = int(os.environ.get("PORT", "8080"))
+        from aiohttp import web
+        app = web.Application()
+        app.router.add_get("/",       lambda r: web.Response(text="OK disabled"))
+        app.router.add_get("/health", lambda r: web.Response(text="OK disabled"))
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, "0.0.0.0", PORT).start()
+        while True:
+            await asyncio.sleep(60)
+            log.info(f"[W={WORKER_ID}] disabled — alive")
+        return
+
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=3, max_size=10,
                                      command_timeout=30)
     await ensure_schema(pool)
