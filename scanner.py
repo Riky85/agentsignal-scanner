@@ -46,6 +46,11 @@ TOTAL_WORKERS = int(os.environ.get("TOTAL_WORKERS", "3"))
 # ── Anti-OOM: valori fissi — NON aumentare senza test di memoria ─────────────
 THREADS    = 6    # 6 richieste HTTP concorrenti per worker (era 30 → OOM)
 BATCH_SIZE = 50   # 50 domini per ciclo (era 200/500 → OOM)
+
+# ── w2 memory override: usa meno thread/batch se WORKER_ID=1 ─────────────────
+if WORKER_ID == 1:
+    THREADS    = 3   # w2 ultra-conservative: 3 threads (evita OOM)
+    BATCH_SIZE = 25  # w2: batch piccoli = meno RAM per ciclo
 RESCAN_DAYS   = int(os.environ.get("RESCAN_DAYS", "9999"))  # v10 full rescan
 PORT          = int(os.environ.get("PORT", "8080"))
 MODE          = os.environ.get("MODE", "scanner")  # scanner | importer | syncer
