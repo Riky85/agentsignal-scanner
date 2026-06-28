@@ -465,11 +465,11 @@ def detect_ai_signals(pages: dict) -> list:
         "careers":   ["ai_hiring"],
         "jobs":      ["ai_hiring"],
         "blog":      ["ai_blog", "ai_product"],
-        "product":   ["ai_product"],
-        "features":  ["ai_product"],
-        "docs":      ["ai_docs"],
+        "product":   ["ai_product", "ai_blog"],
+        "features":  ["ai_product", "ai_blog"],
+        "docs":      ["ai_docs", "ai_product"],
         "changelog": ["ai_changelog"],
-        "homepage":  ["ai_product"],
+        "homepage":  ["ai_product", "ai_blog"],
     }
 
     signals = []
