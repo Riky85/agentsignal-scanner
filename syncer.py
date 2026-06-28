@@ -111,7 +111,7 @@ async def write_scan_history(session, company_id: str, r: dict, payload: dict):
         snap = {
             "company_id":            company_id,
             "website":               r.get("domain",""),
-            "scanned_at":            r.get("last_scan_date") or datetime.utcnow().isoformat(),
+            "scanned_at":            (str(r.get("last_scan_date")) if r.get("last_scan_date") else datetime.utcnow().isoformat()),
             "tech_stack":            tech_stack,
             "ai_stack":              ai_stack,
             "buying_intent_signals": bi_signals,
@@ -126,6 +126,13 @@ async def write_scan_history(session, company_id: str, r: dict, payload: dict):
             "description":           (r.get("description") or "")[:500],
             "changes_vs_previous":   [],  # TODO: diff con scan precedente
         }
+        # Serializza datetime e altri tipi non-JSON
+        def _jsonify(v):
+            if hasattr(v, "isoformat"): return v.isoformat()
+            if isinstance(v, (list, tuple)): return [_jsonify(i) for i in v]
+            if isinstance(v, dict): return {k: _jsonify(vv) for k,vv in v.items()}
+            return v
+        snap = {k: _jsonify(v) for k, v in snap.items()}
         async with session.post(SCAN_HISTORY_URL, headers=HW, json=snap,
                                 timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.ok:
