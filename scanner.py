@@ -1242,6 +1242,11 @@ async def scan_domain(session, row: dict) -> dict | None:
         build_buying_intent_signals, build_gap_signals,
         build_dna_summary, map_scores_to_base44
     )
+    import gc
+
+    # Anti-OOM: tronca prima di processare
+    html    = html[:250_000]        # max 250KB
+    bundles = bundles[:2]           # max 2 bundle JS
 
     # 3a: Business Stack (CDN fingerprint — alta affidabilità)
     biz_stack = detect_biz_stack(html, bundles)
@@ -1264,8 +1269,8 @@ async def scan_domain(session, row: dict) -> dict | None:
 
     # 3d: Derivati per campi Base44
     flat_tech   = build_flat_tech_list(biz_stack, tech_stack_list)
-    ai_list     = build_ai_signals_list(ai_signals)
     tech_dna    = build_tech_dna(biz_stack, tech_stack_list)
+    # (build_ai_signals_list rimosso — usare build_buying_intent_signals)
 
     # Step 4: Digital Maturity Scores
     emp_count = 0
