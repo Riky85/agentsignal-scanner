@@ -1199,7 +1199,8 @@ async def scan_domain(session, row: dict) -> dict | None:
     from engine_dmi_v11 import (
         detect_biz_stack, detect_tech_stack, detect_ai_signals,
         calc_digital_maturity_scores, build_tech_dna, build_flat_tech_list,
-        build_ai_signals_list, build_dna_summary, map_scores_to_base44
+        build_buying_intent_signals, build_gap_signals,
+        build_dna_summary, map_scores_to_base44
     )
 
     # 3a: Business Stack (CDN fingerprint — alta affidabilità)
@@ -1234,10 +1235,15 @@ async def scan_domain(session, row: dict) -> dict | None:
     b44_scores  = map_scores_to_base44(dmi_scores)
     dna_summary = build_dna_summary(biz_stack, tech_stack_list, ai_signals, dmi_scores)
 
-    # Alias per compatibilità return
-    ai_stack   = ai_list
-    tech_stack = flat_tech
-    scores     = b44_scores
+    # Campi Base44:
+    # ai_stack             = lista tool tecnologici (Shopify, Stripe, React, AWS...)
+    # buying_intent_signals = segnali AI leggibili (AI Hiring Signal · careers page)
+    # acquisition_signals  = gap tecnologici (No CRM detected, No Automation...)
+    ai_stack              = flat_tech                                    # tool list
+    tech_stack            = flat_tech                                    # stesso (compatibilità)
+    buying_intent_signals = build_buying_intent_signals(ai_signals)      # AI signals leggibili
+    acquisition_signals   = build_gap_signals(dmi_scores)                # gap tecnologici
+    scores                = b44_scores
 
     # Step 5: Company enrichment (description, CEO, revenue, founded)
     try:
@@ -1247,22 +1253,24 @@ async def scan_domain(session, row: dict) -> dict | None:
         enrichment = {}
 
     return {
-        "domain":              domain,
-        "ai_stack":            json.dumps(ai_stack),
-        "tech_stack":          json.dumps(tech_stack),
-        "technology_dna":      json.dumps(tech_dna),
-        "biz_stack":           json.dumps(biz_stack),
-        "ats_documentation":   dna_summary,
-        "description":         enrichment.get("description") or None,
-        "industry":            enrichment.get("industry") or None,
-        "employee_count":      enrichment.get("employee_count") or None,
-        "revenue_range":       enrichment.get("revenue_range") or None,
-        "country":             enrichment.get("country") or None,
-        "founded_year":        enrichment.get("founded_year") or None,
-        "org_chart":           json.dumps(enrichment.get("org_chart") or []),
-        "logo_url":            enrichment.get("logo_url") or None,
-        "linkedin_url":        enrichment.get("linkedin_url") or None,
-        "last_scan_date":      datetime.now(timezone.utc),
+        "domain":                domain,
+        "ai_stack":              json.dumps(ai_stack),             # lista tool (Shopify, Stripe...)
+        "tech_stack":            json.dumps(tech_stack),
+        "buying_intent_signals": json.dumps(buying_intent_signals),# segnali AI leggibili
+        "acquisition_signals":   json.dumps(acquisition_signals),  # gap tecnologici
+        "technology_dna":        json.dumps(tech_dna),
+        "biz_stack":             json.dumps(biz_stack),
+        "ats_documentation":     dna_summary,
+        "description":           enrichment.get("description") or None,
+        "industry":              enrichment.get("industry") or None,
+        "employee_count":        enrichment.get("employee_count") or None,
+        "revenue_range":         enrichment.get("revenue_range") or None,
+        "country":               enrichment.get("country") or None,
+        "founded_year":          enrichment.get("founded_year") or None,
+        "org_chart":             json.dumps(enrichment.get("org_chart") or []),
+        "logo_url":              enrichment.get("logo_url") or None,
+        "linkedin_url":          enrichment.get("linkedin_url") or None,
+        "last_scan_date":        datetime.now(timezone.utc),
         **scores,
     }
 
