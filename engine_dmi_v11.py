@@ -308,7 +308,10 @@ TECH_SIGNATURES = [
     # Framework frontend
     ("React",      [r"react\.production\.min\.js", r"/react@\d+\.\d",
                     r"__reactFiber[A-Za-z0-9]+", r'data-reactroot']),
-    ("Next.js",    [r"/_next/static/chunks/", r"__NEXT_DATA__"]),
+    ("Next.js",    [r"/_next/static/chunks/",
+                    r"/_next/static/immutable/",       # Turbopack / custom prefix
+                    r"/[a-z0-9_\-]+/_next/static/",    # prefisso custom (es. vercel.com)
+                    r"__NEXT_DATA__"]),
     ("Vue",        [r"vue\.global\.prod\.min\.js", r"/vue@\d+\.\d",
                     r"__vue_app__", r"data-v-app"]),
     ("Angular",    [r'ng-version="\d', r"/zone\.js@\d"]),
@@ -317,7 +320,11 @@ TECH_SIGNATURES = [
     ("Remix",      [r"__remixContext", r"/build/root-[a-f0-9]+\.js"]),
     ("Gatsby",     [r"gatsby-chunk-mapping", r"/gatsby-browser"]),
     # Hosting / CDN (rilevabili da URL)
-    ("Vercel",     [r"\.vercel\.app", r"/_vercel/insights/script\.js"]),
+    ("Vercel",     [r"\.vercel\.app",
+                    r"/_vercel/insights/",
+                    r"vercel-marketing/_next/",         # vercel.com stesso
+                    r"vercel\.com/fonts/",
+                    r'"x-vercel-id"']),
     ("Netlify",    [r"netlify-identity-widget\.js", r"netlify\.app"]),
     ("Cloudflare", [r"cloudflare\.com/cdn-cgi/", r"__cf_bm="]),
     ("AWS",        [r"\.s3\.amazonaws\.com/", r"\.cloudfront\.net/"]),
