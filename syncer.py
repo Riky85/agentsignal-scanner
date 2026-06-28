@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""
-Syncer FINAL — bulk POST + salvataggio base44_id immediato.
-Zero duplicati: load_batch carica SOLO WHERE base44_id IS NULL.
-I base44_id vengono salvati subito dopo ogni bulk insert.
-"""
+"""Syncer FINAL v2 — bulk POST + salvataggio base44_id + healthcheck HTTP"""
 import asyncio, aiohttp, asyncpg, os, json, logging
+from aiohttp import web
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -13,12 +11,15 @@ B44_TOKEN = (os.environ.get("B44_SERVICE_TOKEN") or
              os.environ.get("BASE44_SERVICE_TOKEN") or
              os.environ.get("AGENTSIGNAL_SERVICE_TOKEN") or
              os.environ.get("BASE44_TOKEN") or "")
-APP_ID    = os.environ.get("B44_APP_ID", "6a3a284ab0b87dfa27558bb6")
-BASE_URL  = f"https://app.base44.com/api/apps/{APP_ID}/entities/Company"
-BULK_URL  = f"{BASE_URL}/bulk"
-HW        = {"api-key": B44_TOKEN, "Content-Type": "application/json"}
-BATCH     = 200
-DELAY     = 13.0
+APP_ID   = os.environ.get("B44_APP_ID", "6a3a284ab0b87dfa27558bb6")
+BASE_URL = f"https://app.base44.com/api/apps/{APP_ID}/entities/Company"
+BULK_URL = f"{BASE_URL}/bulk"
+HW       = {"api-key": B44_TOKEN, "Content-Type": "application/json"}
+BATCH    = 200
+DELAY    = 13.0
+PORT     = int(os.environ.get("PORT", 8080))
+
+stats = {"pushed": 0, "errors": 0, "cycle": 0}
 
 def tl(v):
     if isinstance(v, list): return v
@@ -78,13 +79,12 @@ async def push_batch(session, pool, records):
                                 timeout=aiohttp.ClientTimeout(total=60)) as resp:
             if resp.status == 200:
                 inserted = await resp.json(content_type=None) or []
-                # Salva immediatamente i base44_id nel DB Railway
                 async with pool.acquire() as c:
                     for r, item in zip(records, inserted):
                         iid = item.get("id") if isinstance(item, dict) else None
                         if iid:
                             await c.execute(
-                                "UPDATE companies SET base44_id=$1, last_push_date=NOW() WHERE domain=$2",
+                                "UPDATE companies SET base44_id=$1,last_push_date=NOW() WHERE domain=$2",
                                 iid, r["domain"])
                 ok = len([i for i in inserted if isinstance(i,dict) and i.get("id")])
                 return ok, len(records)-ok
@@ -96,31 +96,51 @@ async def push_batch(session, pool, records):
         log.warning(f"Bulk ERR: {e}")
         return 0, len(records)
 
-async def main():
-    if not B44_TOKEN:
-        log.error("ERRORE: nessun token Base44 trovato nelle variabili d'ambiente!")
-        log.error("Imposta B44_SERVICE_TOKEN su Railway.")
-        return
-    log.info(f"=== Syncer FINAL avviato — token: {B44_TOKEN[:12]}... ===")
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=5)
-    async with pool.acquire() as c:
-        total = await c.fetchval("SELECT COUNT(*) FROM companies WHERE last_scan_date IS NOT NULL AND base44_id IS NULL")
-        log.info(f"Record da sincronizzare: {total:,}")
+async def healthcheck(request):
+    return web.Response(text=json.dumps({
+        "status": "ok",
+        "pushed": stats["pushed"],
+        "errors": stats["errors"],
+        "cycle":  stats["cycle"]
+    }), content_type="application/json")
+
+async def run_syncer(pool):
     conn = aiohttp.TCPConnector(limit=5)
     async with aiohttp.ClientSession(connector=conn) as session:
-        pushed = errors = cycle = 0
         while True:
             batch = await load_batch(pool)
             if not batch:
-                log.info(f"Sync completo: pushed={pushed} errors={errors}. Sleep 5min.")
+                log.info(f"Sync completo: pushed={stats['pushed']} errors={stats['errors']}. Sleep 5min.")
                 await asyncio.sleep(300)
                 continue
-            cycle += 1
-            log.info(f"[C{cycle}] {len(batch)} records")
+            stats["cycle"] += 1
+            log.info(f"[C{stats['cycle']}] {len(batch)} records")
             ok, err = await push_batch(session, pool, batch)
-            pushed += ok; errors += err
-            log.info(f"[C{cycle}] ok={ok} err={err} | totale pushed={pushed}")
+            stats["pushed"] += ok
+            stats["errors"] += err
+            log.info(f"[C{stats['cycle']}] ok={ok} err={err} | totale pushed={stats['pushed']}")
             await asyncio.sleep(DELAY)
+
+async def main():
+    log.info(f"=== Syncer FINAL v2 — token: {B44_TOKEN[:12]}... PORT={PORT} ===")
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=5)
+    async with pool.acquire() as c:
+        total = await c.fetchval(
+            "SELECT COUNT(*) FROM companies WHERE last_scan_date IS NOT NULL AND base44_id IS NULL")
+        log.info(f"Record da sincronizzare: {total:,}")
+
+    # Avvia healthcheck HTTP in background
+    app = web.Application()
+    app.router.add_get("/", healthcheck)
+    app.router.add_get("/health", healthcheck)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    log.info(f"Healthcheck su :{PORT}")
+
+    # Avvia syncer loop
+    await run_syncer(pool)
 
 if __name__ == "__main__":
     asyncio.run(main())
