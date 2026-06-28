@@ -128,11 +128,13 @@ async def write_scan_history(session, company_id: str, r: dict, payload: dict):
         }
         async with session.post(SCAN_HISTORY_URL, headers=HW, json=snap,
                                 timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if not resp.ok:
+            if resp.ok:
+                log.info(f"ScanHistory ✓ {r.get('domain','')}")
+            else:
                 body = await resp.text()
-                log.debug(f"ScanHistory POST {r.get('domain')}: {resp.status} {body[:60]}")
+                log.warning(f"ScanHistory ERR {r.get('domain')}: {resp.status} {body[:80]}")
     except Exception as e:
-        log.debug(f"write_scan_history error: {e}")
+        log.warning(f"write_scan_history error {r.get('domain','')}: {type(e).__name__}: {e}")
 
 async def push_one(session, pool, r):
     global pushed_total, errors_total
