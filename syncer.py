@@ -207,7 +207,7 @@ async def push_one(session, pool, r):
                         await c.execute(
                             "UPDATE companies SET last_push_date=NOW() WHERE domain=$1", domain)
                     pushed_total += 1
-                    await write_scan_history(session, b44_id, r, payload)
+                    pass  # ScanHistory disabled — entity not in AgentSignal app
                     return True
                 elif resp.status == 404:
                     async with pool.acquire() as c:
@@ -229,7 +229,7 @@ async def push_one(session, pool, r):
                             "UPDATE companies SET base44_id=$1, last_push_date=NOW() WHERE domain=$2",
                             new_id, domain)
                     pushed_total += 1
-                    await write_scan_history(session, new_id, r, payload)
+                    pass  # ScanHistory disabled — entity not in AgentSignal app
                     return True
                 elif resp.status == 429:
                     log.warning("429 — sleep 60s")
