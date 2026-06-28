@@ -1,3 +1,4 @@
+from datetime import datetime
 #!/usr/bin/env python3
 """AgentSignal Syncer v2 — Postgres Railway to Base44, persistent session"""
 import asyncio, aiohttp, asyncpg, os, json, logging, time
@@ -88,6 +89,51 @@ def build_payload(r):
         "tech_gap_score":         sint(r.get("tech_gap_score") or 0),
     }
 
+
+# ── ScanHistory: cronologia snapshot per ogni azienda ────────────────────────
+SCAN_HISTORY_URL = BASE_URL.replace("/Company", "/ScanHistory")
+
+async def write_scan_history(session, company_id: str, r: dict, payload: dict):
+    """Salva uno snapshot su ScanHistory dopo ogni push riuscito verso Company."""
+    try:
+        def _to_list(v):
+            if isinstance(v, list): return v
+            if isinstance(v, str):
+                try:    return json.loads(v)
+                except: return [v] if v else []
+            return []
+
+        tech_stack  = _to_list(r.get("tech_stack") or r.get("ai_stack"))
+        ai_stack    = _to_list(r.get("ai_stack"))
+        bi_signals  = _to_list(r.get("buying_intent_signals"))
+        acq_signals = _to_list(r.get("acquisition_signals"))
+
+        snap = {
+            "company_id":            company_id,
+            "website":               r.get("domain",""),
+            "scanned_at":            r.get("last_scan_date") or datetime.utcnow().isoformat(),
+            "tech_stack":            tech_stack,
+            "ai_stack":              ai_stack,
+            "buying_intent_signals": bi_signals,
+            "acquisition_signals":   acq_signals,
+            "digital_maturity_score": int(payload.get("ai_adoption_score") or 0),
+            "ai_readiness_score":    int(payload.get("ai_maturity_score") or 0),
+            "automation_score":      int(payload.get("automation_score") or 0),
+            "cloud_score":           int(payload.get("cloud_score") or 0),
+            "commerce_score":        int(payload.get("commerce_score") or 0),
+            "buying_intent_score":   int(payload.get("ai_buying_intent_score") or 0),
+            "employee_count":        int(r.get("employee_count") or 0) or None,
+            "description":           (r.get("description") or "")[:500],
+            "changes_vs_previous":   [],  # TODO: diff con scan precedente
+        }
+        async with session.post(SCAN_HISTORY_URL, headers=HW, json=snap,
+                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if not resp.ok:
+                body = await resp.text()
+                log.debug(f"ScanHistory POST {r.get('domain')}: {resp.status} {body[:60]}")
+    except Exception as e:
+        log.debug(f"write_scan_history error: {e}")
+
 async def push_one(session, pool, r):
     global pushed_total, errors_total
     payload = build_payload(r)
@@ -127,6 +173,7 @@ async def push_one(session, pool, r):
                         await c.execute(
                             "UPDATE companies SET last_push_date=NOW() WHERE domain=$1", domain)
                     pushed_total += 1
+                    await write_scan_history(session, b44_id, r, payload)
                     return True
                 elif resp.status == 404:
                     async with pool.acquire() as c:
@@ -148,6 +195,7 @@ async def push_one(session, pool, r):
                             "UPDATE companies SET base44_id=$1, last_push_date=NOW() WHERE domain=$2",
                             new_id, domain)
                     pushed_total += 1
+                    await write_scan_history(session, new_id, r, payload)
                     return True
                 elif resp.status == 429:
                     log.warning("429 — sleep 60s")
