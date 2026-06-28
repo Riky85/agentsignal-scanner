@@ -43,8 +43,9 @@ HW            = {"api-key": BASE44_TOKEN, "Content-Type": "application/json"}
 
 WORKER_ID     = int(os.environ.get("WORKER_ID", "0"))
 TOTAL_WORKERS = int(os.environ.get("TOTAL_WORKERS", "3"))
-THREADS       = int(os.environ.get("THREADS", "8"))    # anti-OOM: era 30
-BATCH_SIZE    = int(os.environ.get("BATCH_SIZE", "100"))   # anti-OOM: era 200
+# ── Anti-OOM: valori fissi — NON aumentare senza test di memoria ─────────────
+THREADS    = 6    # 6 richieste HTTP concorrenti per worker (era 30 → OOM)
+BATCH_SIZE = 50   # 50 domini per ciclo (era 200/500 → OOM)
 RESCAN_DAYS   = int(os.environ.get("RESCAN_DAYS", "9999"))  # v10 full rescan
 PORT          = int(os.environ.get("PORT", "8080"))
 MODE          = os.environ.get("MODE", "scanner")  # scanner | importer | syncer
