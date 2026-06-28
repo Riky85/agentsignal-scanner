@@ -1195,29 +1195,49 @@ async def scan_domain(session, row: dict) -> dict | None:
         fetch_tech_pages(session, website, domain),
     )
 
-    # Step 3: Detection — Technology & Business Intelligence v10
-    from engine_v10_final import detect_tech_dna, detect_ai_signals, compute_digital_maturity, build_technology_dna_summary
+    # ── Step 3: Detection — Digital Maturity Intelligence v11 ──────────────
+    from engine_dmi_v11 import (
+        detect_biz_stack, detect_tech_stack, detect_ai_signals,
+        calc_digital_maturity_scores, build_tech_dna, build_flat_tech_list,
+        build_ai_signals_list, build_dna_summary, map_scores_to_base44
+    )
 
-    tech_dna    = detect_tech_dna(html, bundles)
-    ai_signals  = detect_ai_signals({
-        "careers":  (await _fetch(session, website + "/careers",  6) or ""),
-        "jobs":     (await _fetch(session, website + "/jobs",      6) or ""),
-        "blog":     (await _fetch(session, website + "/blog",      6) or ""),
-        "product":  (await _fetch(session, website + "/product",   6) or ""),
-        "features": (await _fetch(session, website + "/features",  6) or ""),
-    })
+    # 3a: Business Stack (CDN fingerprint — alta affidabilità)
+    biz_stack = detect_biz_stack(html, bundles)
 
-    # Compatibilità legacy: ai_stack = segnali AI come lista
-    ai_stack   = [s["signal"] for s in ai_signals[:8]]
-    # tech_stack = tutte le tecnologie rilevate flatten
-    tech_stack = [t for tools in tech_dna.values() for t in tools]
-    biz_stack  = tech_dna  # dizionario per categoria
+    # 3b: Tech/Framework Stack (CDN fingerprint)
+    tech_stack_list = detect_tech_stack(html, bundles)
 
-    # Step 4: Scores — Digital Maturity Intelligence
-    scores = compute_digital_maturity(tech_dna, ai_signals)
+    # 3c: AI Signals (testo pubblico: careers, blog, product, docs)
+    page_texts = {
+        "careers":   (await _fetch(session, website + "/careers",  6) or ""),
+        "jobs":      (await _fetch(session, website + "/jobs",      6) or ""),
+        "blog":      (await _fetch(session, website + "/blog",      6) or ""),
+        "product":   (await _fetch(session, website + "/product",   6) or ""),
+        "features":  (await _fetch(session, website + "/features",  6) or ""),
+        "docs":      (await _fetch(session, website + "/docs",      6) or ""),
+        "changelog": (await _fetch(session, website + "/changelog", 6) or ""),
+        "homepage":  html[:50000],
+    }
+    ai_signals = detect_ai_signals(page_texts)
 
-    # Summary per ats_documentation
-    dna_summary = build_technology_dna_summary(tech_dna, ai_signals)
+    # 3d: Derivati per campi Base44
+    flat_tech   = build_flat_tech_list(biz_stack, tech_stack_list)
+    ai_list     = build_ai_signals_list(ai_signals)
+    tech_dna    = build_tech_dna(biz_stack, tech_stack_list)
+
+    # Step 4: Digital Maturity Scores
+    emp_count = 0
+    try: emp_count = int(row.get("employee_count") or 0)
+    except: pass
+    dmi_scores  = calc_digital_maturity_scores(biz_stack, tech_stack_list, ai_signals, emp_count)
+    b44_scores  = map_scores_to_base44(dmi_scores)
+    dna_summary = build_dna_summary(biz_stack, tech_stack_list, ai_signals, dmi_scores)
+
+    # Alias per compatibilità return
+    ai_stack   = ai_list
+    tech_stack = flat_tech
+    scores     = b44_scores
 
     # Step 5: Company enrichment (description, CEO, revenue, founded)
     try:
@@ -1228,11 +1248,11 @@ async def scan_domain(session, row: dict) -> dict | None:
 
     return {
         "domain":              domain,
-        "ai_stack":            json.dumps(ai_stack),   # AI signals come stringhe
-        "tech_stack":          json.dumps(tech_stack), # Tutte le tech rilevate
-        "technology_dna":      json.dumps(tech_dna),   # Dizionario per categoria
-        "ats_documentation":   dna_summary,            # Report leggibile
-        "ats_product_signals": json.dumps(ai_signals[:5]),  # AI signals dettagliati
+        "ai_stack":            json.dumps(ai_stack),
+        "tech_stack":          json.dumps(tech_stack),
+        "technology_dna":      json.dumps(tech_dna),
+        "biz_stack":           json.dumps(biz_stack),
+        "ats_documentation":   dna_summary,
         "description":         enrichment.get("description") or None,
         "industry":            enrichment.get("industry") or None,
         "employee_count":      enrichment.get("employee_count") or None,
@@ -1242,8 +1262,6 @@ async def scan_domain(session, row: dict) -> dict | None:
         "org_chart":           json.dumps(enrichment.get("org_chart") or []),
         "logo_url":            enrichment.get("logo_url") or None,
         "linkedin_url":        enrichment.get("linkedin_url") or None,
-        "biz_stack":           json.dumps(biz_stack) if isinstance(biz_stack, dict) else "{}",
-        "technology_dna":      json.dumps(tech_dna) if isinstance(tech_dna, dict) else "{}",
         "last_scan_date":      datetime.now(timezone.utc),
         **scores,
     }
