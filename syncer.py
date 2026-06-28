@@ -11,10 +11,12 @@ BASE44_TOKEN = os.environ["BASE44_TOKEN"]
 APP_ID       = os.environ["APP_ID"]
 PORT         = int(os.environ.get("PORT","8080"))
 BASE_URL     = f"https://app.base44.com/api/apps/{APP_ID}/entities/Company"
+BULK_URL     = f"https://app.base44.com/api/apps/{APP_ID}/entities/Company/bulk"
 HW           = {"api-key": BASE44_TOKEN, "Content-Type": "application/json"}
 
-RATE_DELAY   = 11    # 1 push every 11s = ~5.4/min (Base44 limit ~6/min)
-BATCH_SIZE   = 50
+RATE_DELAY   = 2     # 2s tra bulk push
+BATCH_SIZE   = 200
+BULK_SIZE    = 50
 pushed_total = 0
 errors_total = 0
 start_time   = time.time()
@@ -167,6 +169,34 @@ async def write_scan_history(session, company_id: str, r: dict, payload: dict):
                 log.warning(f"ScanHistory ERR {r.get('domain')}: {resp.status} {body[:80]}")
     except Exception as e:
         log.warning(f"write_scan_history error {r.get('domain','')}: {type(e).__name__}: {e}")
+
+
+async def push_bulk(session, pool, records):
+    """Bulk insert N record in una sola chiamata HTTP"""
+    global pushed_total, errors_total
+    if not records: return 0, 0
+    payloads = [build_payload(r) for r in records]
+    try:
+        async with session.post(BULK_URL, headers=HW, json=payloads,
+                                timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status == 200:
+                inserted = await resp.json(content_type=None)
+                inserted_ids = [item.get("id") for item in (inserted or []) if item.get("id")]
+                async with pool.acquire() as c:
+                    for r, iid in zip(records, inserted_ids):
+                        if iid:
+                            await c.execute("UPDATE companies SET base44_id=$1 WHERE domain=$2", iid, r["domain"])
+                pushed_total += len(inserted_ids)
+                return len(inserted_ids), 0
+            else:
+                body = await resp.text()
+                log.warning(f"Bulk HTTP {resp.status}: {body[:100]}")
+                errors_total += len(records)
+                return 0, len(records)
+    except Exception as e:
+        log.warning(f"Bulk ERR: {e}")
+        errors_total += len(records)
+        return 0, len(records)
 
 async def push_one(session, pool, r):
     global pushed_total, errors_total
@@ -339,13 +369,13 @@ async def sync_loop(pool):
             log.info(f"[C{cycle}] {len(batch)} records to push | pushed_so_far={pushed_total:,}")
 
             ok_n = 0
-            for i, r in enumerate(batch):
-                ok = await push_one(session, pool, r)
-                if ok:
-                    ok_n += 1
+            # Bulk push: raggruppa in chunk da BULK_SIZE e invia in una sola chiamata
+            for chunk_start in range(0, len(batch), BULK_SIZE):
+                chunk = batch[chunk_start:chunk_start + BULK_SIZE]
+                ok_chunk, err_chunk = await push_bulk(session, pool, chunk)
+                ok_n += ok_chunk
                 await asyncio.sleep(RATE_DELAY)
-                if (i + 1) % 10 == 0:
-                    log.info(f"  [{i+1}/{len(batch)}] ok={ok_n} total={pushed_total:,}")
+                log.info(f"  [{min(chunk_start+BULK_SIZE,len(batch))}/{len(batch)}] ok={ok_n} total={pushed_total:,}")
 
             log.info(
                 f"[C{cycle}] done ok={ok_n}/{len(batch)} | "
