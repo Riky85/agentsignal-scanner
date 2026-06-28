@@ -20,6 +20,31 @@ errors_total = 0
 start_time   = time.time()
 
 
+
+# ── Buying Intent: converti raw keys → etichette leggibili ────────────────────
+_BI_LABELS = {
+    "has_ai_page":        "🤖 AI Product Page detected",
+    "has_careers":        "👥 Active Hiring",
+    "has_api_docs":       "📡 Public API / Developer Docs",
+    "ai_hiring":          "🔍 Hiring AI/ML Engineers",
+    "ai_stack_detected":  "⚡ AI Stack in Production",
+    "ai_blog":            "📝 AI Blog Activity",
+    "ai_product":         "🚀 AI Product Feature",
+    "ai_docs":            "📚 AI in Documentation",
+    "ai_changelog":       "🔄 AI Changelog Updates",
+    "ai_integration":     "🔗 AI Integration Partner",
+}
+
+def _normalize_buying_intent(signals: list) -> list:
+    """Converti raw keys (has_ai_page) in etichette leggibili per la UI."""
+    result = []
+    for s in (signals or []):
+        if isinstance(s, str):
+            result.append(_BI_LABELS.get(s, s))   # se non trovata, usa la key originale
+        elif isinstance(s, dict):
+            result.append(s)   # già formattato
+    return result
+
 def build_payload(r):
     """Payload per Base44. Schema Base44: tech_stack/ai_stack=array, scores=integer, ats_*=number (non inviare come stringa)."""
     def _list(v):
@@ -70,9 +95,9 @@ def build_payload(r):
         "employee_count":         int(r["employee_count"]) if r.get("employee_count") else None,
         "revenue_range":          sstr(r.get("revenue_range")),
         "global_rank":            int(r["global_rank"]) if r.get("global_rank") else None,
-        "ai_stack":               ts,   # tool tecnologici: Shopify, Stripe, React...
+        "ai_stack":               ts,   # tool CDN fingerprint: Shopify, Stripe, React (NO testo)
         "tech_stack":             ts,   # stesso (doppio campo per compatibilità UI)
-        "buying_intent_signals":  _list(r.get("buying_intent_signals")),  # segnali AI leggibili
+        "buying_intent_signals":  _normalize_buying_intent(_list(r.get("buying_intent_signals"))),
         "acquisition_signals":    _list(r.get("acquisition_signals")),    # gap tecnologici
         "org_chart":              org,
         "ai_adoption_score":      sint(r.get("ai_score") or r.get("ai_readiness") or 0),
