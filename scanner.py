@@ -49,11 +49,6 @@ BATCH_SIZE = 50   # 50 domini per ciclo (era 200/500 → OOM)
 RESCAN_DAYS   = int(os.environ.get("RESCAN_DAYS", "9999"))  # v10 full rescan
 PORT          = int(os.environ.get("PORT", "8080"))
 MODE          = os.environ.get("MODE", "scanner")  # scanner | importer | syncer
-# ── w2 override: WORKER_ID=1 → disabled mode (OOM prevention) ───────────────
-if int(os.environ.get("WORKER_ID", "0")) == 1 and MODE == "scanner":
-    _override = os.environ.get("FORCE_SCAN", "")
-    if not _override:
-        MODE = "disabled"  # w2 disabilitato — solo healthcheck
 
 # ── DB Schema ─────────────────────────────────────────────────────────────────
 SCHEMA_SQL = """
