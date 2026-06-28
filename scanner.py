@@ -439,15 +439,32 @@ HEADERS = {
 }
 
 
-async def fetch(session, url: str, timeout: int = 12) -> str:
+MAX_RESPONSE_BYTES = 120_000   # 120KB max per risposta — anti-OOM
+
+async def fetch(session, url: str, timeout: int = 8) -> str:
+    """Fetch con hard cap 120KB — previene OOM da risposte giganti."""
     try:
         async with session.get(url, headers=HEADERS,
-                               timeout=aiohttp.ClientTimeout(total=timeout),
-                               allow_redirects=True, max_redirects=5) as r:
-            if r.status == 200:
-                ct = r.headers.get("Content-Type", "")
-                if "text" in ct or "javascript" in ct or "json" in ct:
-                    return await r.text(errors="replace")
+                               timeout=aiohttp.ClientTimeout(total=timeout, connect=4),
+                               allow_redirects=True, max_redirects=3) as r:
+            if r.status != 200:
+                return ""
+            ct = r.headers.get("Content-Type", "")
+            if not any(k in ct for k in ("text", "javascript", "json")):
+                return ""
+            # Controlla Content-Length prima di leggere
+            cl = r.headers.get("Content-Length")
+            if cl and int(cl) > 5_000_000:   # >5MB → salta
+                return ""
+            # Leggi in streaming con cap 120KB
+            chunks, total = [], 0
+            async for chunk in r.content.iter_chunked(16_384):  # 16KB chunks
+                chunks.append(chunk)
+                total += len(chunk)
+                if total >= MAX_RESPONSE_BYTES:
+                    break
+            raw = b"".join(chunks)[:MAX_RESPONSE_BYTES]
+            return raw.decode("utf-8", errors="replace")
     except Exception:
         pass
     return ""
