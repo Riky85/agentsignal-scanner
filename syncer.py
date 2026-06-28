@@ -317,7 +317,7 @@ async def load_batch(pool):
                    base44_id, last_scan_date, last_push_date
             FROM companies
             WHERE last_scan_date IS NOT NULL
-              AND (base44_id IS NULL OR last_push_date < last_scan_date)
+              AND base44_id IS NULL
               AND COALESCE(scan_errors, 0) < 5
             ORDER BY
               CASE WHEN jsonb_array_length(COALESCE(tech_stack,'[]'::jsonb)) > 0 THEN 0 ELSE 1 END,
