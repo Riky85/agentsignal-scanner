@@ -429,7 +429,7 @@ async def _dedup_b44(session):
     """Scarica tutti i record Base44, trova duplicati per nome, elimina i meno ricchi."""
     from collections import defaultdict
     import re
-    HDR = {"api-key": B44_API_KEY, "Content-Type": "application/json"}
+    HDR = {"api-key": HW["api-key"], "Content-Type": "application/json"}
 
     def norm(s): return re.sub(r"[\s\-\.]", "", (s or "").strip().lower())
     def richness(c):
