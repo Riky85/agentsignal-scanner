@@ -524,6 +524,46 @@ async def fetch_tech_pages(session, base_url: str, domain: str) -> str:
     return " ".join(texts)
 
 
+
+# ── Filtro qualità domini ─────────────────────────────────────────────────────
+_INFRA_DOMAINS = frozenset([
+    "amazonaws.com","cloudfront.net","github.io","netlify.app","vercel.app",
+    "herokuapp.com","azurewebsites.net","pages.dev","onrender.com","railway.app",
+    "fly.dev","in-addr.arpa","azure-dns.net","nflxso.net","html-load.com",
+    "akamaiedge.net","fastly.net","edgecastcdn.net","cloudflare.net",
+])
+
+def is_valid_company(domain: str, name: str = "") -> bool:
+    """
+    Ritorna True se il dominio/nome sembra un'azienda reale.
+    Esclude: nomi numerici, codici slug, DNS/infra, UUID, bot/test.
+    """
+    d = (domain or "").lower().strip()
+    n = (name  or "").strip()
+
+    # Dominio infra/CDN
+    if any(inf in d for inf in _INFRA_DOMAINS): return False
+
+    # Nome puramente numerico
+    if re.fullmatch(r'\d+', n): return False
+
+    # Codice slug (es. Jsxs058, Sz000004, Jn0432)
+    if re.fullmatch(r'[A-Za-z]{2,6}\d{3,}', n): return False
+    if re.fullmatch(r'[a-z]{3,8}\d{3,}', n):   return False
+
+    # DNS / infra nel nome
+    if re.search(r'\b(dns\d*|ns\d+|nameserver|mx\d|smtp|pop3|imap|ftp\d)\b', n, re.IGNORECASE):
+        return False
+
+    # Bot / template / placeholder
+    if re.search(r'\b(placeholder|lorem|ipsum)\b', n, re.IGNORECASE): return False
+
+    # Hash nel dominio (cloudfront-style: d2b19eaxqb3dix.cloudfront)
+    if re.fullmatch(r'[a-z0-9]{10,}', d.split(".")[0]) and not re.search(r'[aeiou]{2,}', d.split(".")[0]):
+        return False
+
+    return True
+
 async def scan_domain(session, row: dict) -> dict | None:
     domain  = row["domain"]
     website = row.get("website") or f"https://{domain}"
