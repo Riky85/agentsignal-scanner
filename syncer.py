@@ -48,7 +48,7 @@ def _normalize_buying_intent(signals: list) -> list:
     return result
 
 def build_payload(r):
-    """Payload per Base44. Schema Base44: tech_stack/ai_stack=array, scores=integer, ats_*=number (non inviare come stringa)."""
+    """Payload per Base44 — mapping corretto dai campi Railway DB"""
     def _list(v):
         if v is None: return []
         if isinstance(v, list): return v
@@ -59,36 +59,38 @@ def build_payload(r):
             except: return []
         return []
 
+    def _dict(v):
+        if isinstance(v, dict): return v
+        if isinstance(v, str):
+            try: return json.loads(v)
+            except: return {}
+        return {}
+
     def sstr(v):
         s = str(v).strip() if v is not None else ""
-        return s if s and s not in ("None", "null", "[]", "{}", "") else None
+        return s if s and s not in ("None","null","[]","{}","") else None
 
-    def sint(v):
-        try: return max(0, min(100, int(float(v)))) if v is not None else 0
+    def sint(v, cap=100):
+        try: return max(0, min(cap, int(float(v)))) if v is not None else 0
         except: return 0
 
-    # Org chart (array)
-    org = _list(r.get("org_chart"))
-
-    # tech_stack: usa tech_stack oppure ricostruisce da technology_dna
     ts = _list(r.get("tech_stack"))
     if not ts:
-        td_raw = r.get("technology_dna") or r.get("biz_stack")
-        if td_raw:
-            try:
-                td_dict = json.loads(td_raw) if isinstance(td_raw, str) else td_raw
-                if isinstance(td_dict, dict):
-                    ts = [t for tools in td_dict.values()
-                          for t in (tools if isinstance(tools, list) else [])]
-            except: pass
+        td = _dict(r.get("technology_dna") or r.get("biz_stack"))
+        ts = [t for tools in td.values() for t in (tools if isinstance(tools, list) else [])]
 
-    # AI stack (array di segnali)
     ai = _list(r.get("ai_stack"))
+
+    digital_maturity = sint(r.get("maturity_score") or r.get("digital_maturity") or 0)
+    ai_readiness     = sint(r.get("ai_score") or 0)
+    buying_intent    = sint(r.get("intent_score") or 0)
+
+    website = sstr(r.get("website")) or "https://" + r["domain"]
 
     return {
         "name":                   sstr(r.get("name")) or r["domain"].split(".")[0].title(),
-        "website":                sstr(r.get("website")) or "https://" + r["domain"],
-        "source":                 sstr(r.get("source")) or "railway",
+        "website":                website,
+        "source":                 "railway_scan",
         "description":            sstr(r.get("description")),
         "industry":               sstr(r.get("industry")),
         "country":                sstr(r.get("country")),
@@ -97,17 +99,17 @@ def build_payload(r):
         "employee_count":         int(r["employee_count"]) if r.get("employee_count") else None,
         "revenue_range":          sstr(r.get("revenue_range")),
         "global_rank":            int(r["global_rank"]) if r.get("global_rank") else None,
-        "ai_stack":               ts,   # tool CDN fingerprint: Shopify, Stripe, React (NO testo)
-        "tech_stack":             ts,   # stesso (doppio campo per compatibilità UI)
+        "tech_stack":             ts,
+        "ai_stack":               ai,
         "buying_intent_signals":  _normalize_buying_intent(_list(r.get("buying_intent_signals"))),
-        "acquisition_signals":    _list(r.get("acquisition_signals")),    # gap tecnologici
-        "org_chart":              org,
-        "ai_adoption_score":      sint(r.get("ai_score") or r.get("ai_readiness") or 0),
-        "ai_maturity_score":      min(5, sint(r.get("maturity_score") or r.get("digital_maturity") or 0) // 20),
-        "ai_buying_intent_score": sint(r.get("intent_score") or r.get("buying_intent") or 0),
-        "ai_transformation_score":sint(r.get("ai_score") or 0),
-        "cloud_score":            sint(r.get("cloud_score") or r.get("cloud_maturity") or 0),
-        "automation_score":       sint(r.get("automation_score") or r.get("automation_level") or 0),
+        "acquisition_signals":    _list(r.get("acquisition_signals")),
+        "org_chart":              _list(r.get("org_chart")),
+        "ai_adoption_score":      ai_readiness,
+        "ai_maturity_score":      min(5, digital_maturity // 20),
+        "ai_buying_intent_score": buying_intent,
+        "ai_transformation_score":ai_readiness,
+        "cloud_score":            sint(r.get("cloud_score") or 0),
+        "automation_score":       sint(r.get("automation_score") or 0),
         "developer_score":        sint(r.get("developer_score") or 0),
         "security_score":         sint(r.get("security_score") or 0),
         "growth_score":           sint(r.get("growth_score") or 0),
@@ -172,31 +174,58 @@ async def write_scan_history(session, company_id: str, r: dict, payload: dict):
 
 
 async def push_bulk(session, pool, records):
-    """Bulk insert N record in una sola chiamata HTTP"""
+    """Bulk insert con upsert guard per website — zero duplicati"""
     global pushed_total, errors_total
     if not records: return 0, 0
-    payloads = [build_payload(r) for r in records]
-    try:
-        async with session.post(BULK_URL, headers=HW, json=payloads,
-                                timeout=aiohttp.ClientTimeout(total=30)) as resp:
-            if resp.status == 200:
-                inserted = await resp.json(content_type=None)
-                inserted_ids = [item.get("id") for item in (inserted or []) if item.get("id")]
-                async with pool.acquire() as c:
-                    for r, iid in zip(records, inserted_ids):
-                        if iid:
-                            await c.execute("UPDATE companies SET base44_id=$1 WHERE domain=$2", iid, r["domain"])
-                pushed_total += len(inserted_ids)
-                return len(inserted_ids), 0
-            else:
-                body = await resp.text()
-                log.warning(f"Bulk HTTP {resp.status}: {body[:100]}")
-                errors_total += len(records)
-                return 0, len(records)
-    except Exception as e:
-        log.warning(f"Bulk ERR: {e}")
-        errors_total += len(records)
-        return 0, len(records)
+
+    # Separa record nuovi (base44_id=None) da aggiornamenti (base44_id noto)
+    new_recs    = [r for r in records if not r.get("base44_id")]
+    update_recs = [r for r in records if r.get("base44_id")]
+
+    inserted_n = 0; updated_n = 0; err_n = 0
+
+    # INSERT nuovi via /bulk
+    if new_recs:
+        payloads = [build_payload(r) for r in new_recs]
+        try:
+            async with session.post(BULK_URL, headers=HW, json=payloads,
+                                    timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    inserted = await resp.json(content_type=None)
+                    inserted_ids = [item.get("id") for item in (inserted or []) if item.get("id")]
+                    async with pool.acquire() as c:
+                        for r, iid in zip(new_recs, inserted_ids):
+                            if iid:
+                                await c.execute(
+                                    "UPDATE companies SET base44_id=$1, last_push_date=NOW() WHERE domain=$2",
+                                    iid, r["domain"])
+                    inserted_n = len(inserted_ids)
+                    pushed_total += inserted_n
+                else:
+                    body = await resp.text()
+                    log.warning(f"Bulk POST HTTP {resp.status}: {body[:100]}")
+                    err_n += len(new_recs)
+        except Exception as e:
+            log.warning(f"Bulk POST ERR: {e}")
+            err_n += len(new_recs)
+
+    # UPDATE esistenti via PUT singolo (hanno già base44_id)
+    for r in update_recs:
+        payload = build_payload(r)
+        try:
+            async with session.put(f"{BASE_URL}/{r['base44_id']}", headers=HW, json=payload,
+                                   timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    updated_n += 1; pushed_total += 1
+                    async with pool.acquire() as c:
+                        await c.execute("UPDATE companies SET last_push_date=NOW() WHERE domain=$1", r["domain"])
+                else:
+                    err_n += 1
+        except Exception as e:
+            err_n += 1
+
+    errors_total += err_n
+    return inserted_n + updated_n, err_n
 
 async def push_one(session, pool, r):
     global pushed_total, errors_total
