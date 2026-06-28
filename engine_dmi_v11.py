@@ -445,15 +445,25 @@ def detect_tech_stack(html: str, bundles: list) -> list:
     return found
 
 
+def _extract_visible_text(html: str) -> str:
+    """Estrae solo testo visibile — rimuove script/style/tag HTML."""
+    t = re.sub(r'<style[^>]*>.*?</style>', ' ', html, flags=re.DOTALL|re.IGNORECASE)
+    t = re.sub(r'<script[^>]*>.*?</script>', ' ', t, flags=re.DOTALL|re.IGNORECASE)
+    t = re.sub(r'<[^>]+>', ' ', t)
+    t = re.sub(r'\\[a-z]', ' ', t)   # escape sequences JSON
+    t = re.sub(r'\s+', ' ', t)
+    return t.lower().strip()
+
+
 def detect_ai_signals(pages: dict) -> list:
     """
-    Rileva segnali AI da testo di pagine pubbliche.
-    pages = {"careers": str, "blog": str, "product": str, "docs": str, "changelog": str}
-    Restituisce lista di {type, signal_text, weight}
+    Rileva segnali AI da testo VISIBILE di pagine pubbliche.
+    pages = {"careers": html_str, "blog": html_str, ...}
+    Restituisce lista di {type, page, weight} — NO snippet HTML grezzo.
     """
-    # Mapping pagina → tipi di segnale rilevanti
     PAGE_SIGNAL_MAP = {
         "careers":   ["ai_hiring"],
+        "jobs":      ["ai_hiring"],
         "blog":      ["ai_blog", "ai_product"],
         "product":   ["ai_product"],
         "features":  ["ai_product"],
@@ -465,10 +475,11 @@ def detect_ai_signals(pages: dict) -> list:
     signals = []
     seen    = set()
 
-    for page_name, text in pages.items():
-        if not text:
+    for page_name, raw_html in pages.items():
+        if not raw_html:
             continue
-        text_lower = text.lower()
+        # Estrai testo visibile — no JSON/JS grezzo
+        text = _extract_visible_text(raw_html)
         relevant_types = PAGE_SIGNAL_MAP.get(page_name, [])
 
         for sig_def in AI_SIGNAL_PATTERNS:
@@ -476,18 +487,17 @@ def detect_ai_signals(pages: dict) -> list:
                 continue
             for pat in sig_def["patterns"]:
                 try:
-                    m = re.search(pat, text_lower)
+                    m = re.search(pat, text)
                     if m:
-                        snippet = text_lower[max(0, m.start()-30):m.end()+60].strip()
-                        key     = (sig_def["type"], m.group(0)[:40])
+                        key = (sig_def["type"], page_name)
                         if key not in seen:
                             seen.add(key)
                             signals.append({
                                 "type":   sig_def["type"],
-                                "signal": snippet[:120],
                                 "page":   page_name,
                                 "weight": sig_def["weight"],
                             })
+                            break  # un segnale per tipo per pagina
                 except re.error:
                     pass
 
@@ -643,15 +653,25 @@ def build_flat_tech_list(biz_stack: dict, tech_stack: list) -> list:
 
 
 def build_ai_signals_list(ai_signals: list) -> list:
-    """Lista di stringhe leggibili dei segnali AI — per Base44 ai_stack field."""
-    seen  = set()
+    """
+    Lista di etichette LEGGIBILI per il campo ai_stack su Base44.
+    Formato: "AI Hiring Signal · careers" — NO snippet HTML grezzo.
+    """
+    SIGNAL_LABELS = {
+        "ai_hiring":    "AI Hiring Signal",
+        "ai_product":   "AI Product Feature",
+        "ai_blog":      "AI Blog Announcement",
+        "ai_docs":      "AI in Documentation",
+        "ai_changelog": "AI Changelog Update",
+    }
+    seen   = set()
     result = []
     for s in sorted(ai_signals, key=lambda x: -x["weight"]):
-        label = f"[{s['type']}] {s['signal'][:80]}"
+        label = f"{SIGNAL_LABELS.get(s['type'], s['type'])} · {s['page']}"
         if label not in seen:
             seen.add(label)
             result.append(label)
-    return result[:10]  # top 10 segnali
+    return result[:8]  # max 8 segnali leggibili
 
 
 def build_dna_summary(biz_stack: dict, tech_stack: list, ai_signals: list, scores: dict) -> str:
