@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Syncer v3 — healthcheck HTTP avviato SUBITO, poi sync in background"""
-import asyncio, aiohttp, asyncpg, os, json, logging
-from aiohttp import web
-import threading
+"""Syncer v4 — upsert reale: bulk insert + salva base44_id sul DB Railway
+   Se base44_id già presente → SKIP (record già sincronizzato, niente duplicati).
+   Se base44_id NULL → bulk POST → salva gli ID restituiti → mai più reinserzioni.
+"""
+import asyncio, aiohttp, asyncpg, os, json, logging, threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-B44_TOKEN = (os.environ.get("B44_SERVICE_TOKEN") or
-             os.environ.get("BASE44_SERVICE_TOKEN") or
-             os.environ.get("AGENTSIGNAL_SERVICE_TOKEN") or
-             os.environ.get("BASE44_TOKEN") or "")
+B44_TOKEN    = (os.environ.get("B44_SERVICE_TOKEN") or
+                os.environ.get("BASE44_SERVICE_TOKEN") or
+                os.environ.get("AGENTSIGNAL_SERVICE_TOKEN") or "")
 APP_ID   = os.environ.get("B44_APP_ID", "6a3a284ab0b87dfa27558bb6")
 BULK_URL = f"https://app.base44.com/api/apps/{APP_ID}/entities/Company/bulk"
 HW       = {"api-key": B44_TOKEN, "Content-Type": "application/json"}
@@ -19,40 +20,31 @@ BATCH    = 200
 DELAY    = 13.0
 PORT     = int(os.environ.get("PORT", 8080))
 
-stats = {"pushed": 0, "errors": 0, "cycle": 0, "status": "starting", "pending": 0}
+stats = {"pushed": 0, "skipped": 0, "errors": 0, "cycle": 0, "pending": 0, "status": "starting"}
 
-# --- Healthcheck HTTP (avviato in thread separato IMMEDIATAMENTE) ---
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
+# --- Healthcheck HTTP — avviato SUBITO in thread ---
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
         body = json.dumps(stats).encode()
         self.send_response(200)
-        self.send_header("Content-Type","application/json")
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-    def log_message(self, *a): pass  # silenzioso
+    def log_message(self, *a): pass
 
-def start_http():
-    srv = HTTPServer(("0.0.0.0", PORT), Health)
-    log.info(f"Healthcheck HTTP su :{PORT}")
-    srv.serve_forever()
+threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), Health).serve_forever(), daemon=True).start()
+log.info(f"Healthcheck HTTP su :{PORT}")
 
-# Avvia HTTP PRIMA di qualsiasi altra cosa
-t = threading.Thread(target=start_http, daemon=True)
-t.start()
-log.info("HTTP thread avviato")
-
-# --- Helper ---
+# --- Helpers ---
 def tl(v):
     if isinstance(v, list): return v
-    try: p=json.loads(v); return p if isinstance(p,list) else []
+    try: p = json.loads(v); return p if isinstance(p, list) else []
     except: return []
 
 def tod(v):
     if isinstance(v, dict): return v
-    try: p=json.loads(v); return p if isinstance(p,dict) else {}
+    try: p = json.loads(v); return p if isinstance(p, dict) else {}
     except: return {}
 
 def build(r):
@@ -78,19 +70,20 @@ def build(r):
         "ai_buying_intent_score": int(r.get("intent_score") or 0),
     }
 
-# --- Sync loop asincrono ---
+# --- Sync loop ---
 async def load_batch(pool):
+    """Carica SOLO record con base44_id NULL (non ancora sincronizzati)"""
     async with pool.acquire() as c:
         rows = await c.fetch("""
-            SELECT id,domain,name,website,source,global_rank,
-                   ai_stack,tech_stack,technology_dna,
-                   ai_score,maturity_score,cloud_score,automation_score,
-                   intent_score,commerce_score,growth_score,
-                   description,industry,employee_count,country
+            SELECT id, domain, name, website, source, global_rank,
+                   ai_stack, tech_stack, technology_dna,
+                   ai_score, maturity_score, cloud_score, automation_score,
+                   intent_score, commerce_score, growth_score,
+                   description, industry, employee_count, country
             FROM companies
             WHERE last_scan_date IS NOT NULL
               AND base44_id IS NULL
-              AND COALESCE(scan_errors,0) < 5
+              AND COALESCE(scan_errors, 0) < 5
             ORDER BY global_rank ASC NULLS LAST
             LIMIT $1
         """, BATCH)
@@ -103,6 +96,7 @@ async def push_batch(session, pool, records):
                                 timeout=aiohttp.ClientTimeout(total=60)) as resp:
             if resp.status == 200:
                 inserted = await resp.json(content_type=None) or []
+                # Salva base44_id per ogni record → impedisce reinserzioni future
                 async with pool.acquire() as c:
                     for r, item in zip(records, inserted):
                         iid = item.get("id") if isinstance(item, dict) else None
@@ -110,20 +104,22 @@ async def push_batch(session, pool, records):
                             await c.execute(
                                 "UPDATE companies SET base44_id=$1, last_push_date=NOW() WHERE domain=$2",
                                 iid, r["domain"])
-                ok = len([i for i in inserted if isinstance(i,dict) and i.get("id")])
-                return ok, len(records)-ok
+                ok  = len([i for i in inserted if isinstance(i, dict) and i.get("id")])
+                err = len(records) - ok
+                return ok, err
             else:
-                body = await resp.text()
-                log.warning(f"Bulk {resp.status}: {body[:120]}")
+                txt = await resp.text()
+                log.warning(f"Bulk {resp.status}: {txt[:120]}")
                 return 0, len(records)
     except Exception as e:
         log.warning(f"Bulk ERR: {e}")
         return 0, len(records)
 
-async def sync_loop():
+async def main():
+    log.info(f"=== Syncer v4 — token={B44_TOKEN[:12]}... PORT={PORT} ===")
     stats["status"] = "connecting"
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=5)
-    
+
     async with pool.acquire() as c:
         pending = await c.fetchval(
             "SELECT COUNT(*) FROM companies WHERE last_scan_date IS NOT NULL AND base44_id IS NULL")
@@ -136,23 +132,19 @@ async def sync_loop():
         while True:
             batch = await load_batch(pool)
             if not batch:
-                stats["status"] = "idle"
-                log.info(f"Sync completo — pushed={stats['pushed']}. Sleep 5min.")
+                stats["status"] = "idle — sync completo"
+                log.info(f"✅ Sync completo. pushed={stats['pushed']} Sleep 5min.")
                 await asyncio.sleep(300)
                 stats["status"] = "running"
                 continue
             stats["cycle"] += 1
-            log.info(f"[C{stats['cycle']}] {len(batch)} records")
+            log.info(f"[C{stats['cycle']}] {len(batch)} records da pushare")
             ok, err = await push_batch(session, pool, batch)
-            stats["pushed"] += ok
-            stats["errors"] += err
-            stats["pending"] = max(0, stats["pending"] - ok)
+            stats["pushed"]  += ok
+            stats["errors"]  += err
+            stats["pending"]  = max(0, stats["pending"] - ok)
             log.info(f"[C{stats['cycle']}] ok={ok} err={err} | pushed={stats['pushed']} pending={stats['pending']}")
             await asyncio.sleep(DELAY)
-
-async def main():
-    log.info(f"=== Syncer v3 — token={B44_TOKEN[:12]}... PORT={PORT} ===")
-    await sync_loop()
 
 if __name__ == "__main__":
     asyncio.run(main())
