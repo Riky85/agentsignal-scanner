@@ -5,7 +5,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-B44_TOKEN    = os.environ["B44_SERVICE_TOKEN"]
+B44_TOKEN    = (os.environ.get("B44_SERVICE_TOKEN") or os.environ.get("BASE44_SERVICE_TOKEN") or os.environ.get("AGENTSIGNAL_SERVICE_TOKEN") or os.environ.get("BASE44_TOKEN") or "")
 APP_ID       = os.environ.get("B44_APP_ID", "6a3a284ab0b87dfa27558bb6")
 BASE_URL     = f"https://app.base44.com/api/apps/{APP_ID}/entities/Company"
 HW           = {"api-key": B44_TOKEN, "Content-Type": "application/json"}
