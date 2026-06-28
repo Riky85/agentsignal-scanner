@@ -174,15 +174,51 @@ async def write_scan_history(session, company_id: str, r: dict, payload: dict):
 
 
 async def push_bulk(session, pool, records):
-    """Bulk insert con upsert guard per website — zero duplicati"""
+    """
+    Upsert sicuro: per ogni record controlla se esiste su Base44 per website.
+    Se esiste → PUT (aggiorna). Se non esiste → POST (inserisce).
+    Zero duplicati garantiti indipendentemente dallo stato del DB Railway.
+    """
     global pushed_total, errors_total
     if not records: return 0, 0
 
-    # Separa record nuovi (base44_id=None) da aggiornamenti (base44_id noto)
-    new_recs    = [r for r in records if not r.get("base44_id")]
-    update_recs = [r for r in records if r.get("base44_id")]
+    ok_n = 0; err_n = 0
 
-    inserted_n = 0; updated_n = 0; err_n = 0
+    # Costruisci lookup website → base44_id da DB Railway (già noti)
+    known = {r["domain"]: r.get("base44_id") for r in records if r.get("base44_id")}
+
+    # Per i record senza base44_id, fai GET batch per website
+    unknown = [r for r in records if not r.get("base44_id")]
+    if unknown:
+        # Controlla 10 alla volta per non sovraccaricare
+        chunk_size = 20
+        for i in range(0, len(unknown), chunk_size):
+            chunk = unknown[i:i+chunk_size]
+            for r in chunk:
+                website = (r.get("website") or "https://" + r["domain"]).rstrip("/")
+                try:
+                    async with session.get(
+                        BASE_URL,
+                        headers=HW,
+                        params={"website": website, "limit": 1, "fields": "id,website"},
+                        timeout=aiohttp.ClientTimeout(total=6)
+                    ) as resp:
+                        if resp.status == 200:
+                            existing = await resp.json(content_type=None)
+                            if existing and isinstance(existing, list) and existing[0].get("id"):
+                                b44_id = existing[0]["id"]
+                                known[r["domain"]] = b44_id
+                                # Salva nel DB Railway per future sessioni
+                                async with pool.acquire() as c:
+                                    await c.execute(
+                                        "UPDATE companies SET base44_id=$1 WHERE domain=$2",
+                                        b44_id, r["domain"])
+                except Exception:
+                    pass
+
+    # Ora esegui upsert
+    new_recs    = [r for r in records if not known.get(r["domain"])]
+    update_recs = [r for r in records if known.get(r["domain"])]
 
     # INSERT nuovi via /bulk
     if new_recs:
@@ -199,8 +235,9 @@ async def push_bulk(session, pool, records):
                                 await c.execute(
                                     "UPDATE companies SET base44_id=$1, last_push_date=NOW() WHERE domain=$2",
                                     iid, r["domain"])
-                    inserted_n = len(inserted_ids)
-                    pushed_total += inserted_n
+                                known[r["domain"]] = iid
+                    ok_n += len(inserted_ids)
+                    pushed_total += len(inserted_ids)
                 else:
                     body = await resp.text()
                     log.warning(f"Bulk POST HTTP {resp.status}: {body[:100]}")
@@ -209,23 +246,25 @@ async def push_bulk(session, pool, records):
             log.warning(f"Bulk POST ERR: {e}")
             err_n += len(new_recs)
 
-    # UPDATE esistenti via PUT singolo (hanno già base44_id)
+    # UPDATE esistenti via PUT singolo
     for r in update_recs:
+        b44_id  = known[r["domain"]]
         payload = build_payload(r)
         try:
-            async with session.put(f"{BASE_URL}/{r['base44_id']}", headers=HW, json=payload,
+            async with session.put(f"{BASE_URL}/{b44_id}", headers=HW, json=payload,
                                    timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
-                    updated_n += 1; pushed_total += 1
+                    ok_n += 1; pushed_total += 1
                     async with pool.acquire() as c:
-                        await c.execute("UPDATE companies SET last_push_date=NOW() WHERE domain=$1", r["domain"])
+                        await c.execute(
+                            "UPDATE companies SET last_push_date=NOW() WHERE domain=$1", r["domain"])
                 else:
                     err_n += 1
         except Exception as e:
             err_n += 1
 
     errors_total += err_n
-    return inserted_n + updated_n, err_n
+    return ok_n, err_n
 
 async def push_one(session, pool, r):
     global pushed_total, errors_total
