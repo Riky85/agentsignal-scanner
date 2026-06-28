@@ -592,11 +592,23 @@ async def _dedup_b44(session):
 
     log.info(f"  Dedup: eliminati={deleted} merged={merged} ✓")
 
+
+async def startup_reset_ids(pool):
+    """Reset base44_id all'avvio — garantisce zero duplicati."""
+    async with pool.acquire() as c:
+        n = await c.fetchval("SELECT COUNT(*) FROM companies WHERE base44_id IS NOT NULL")
+        if n > 0:
+            await c.execute("UPDATE companies SET base44_id=NULL, last_push_date=NULL WHERE base44_id IS NOT NULL")
+            log.info(f"STARTUP RESET: {n:,} base44_id azzerati")
+        total = await c.fetchval("SELECT COUNT(*) FROM companies WHERE last_scan_date IS NOT NULL")
+        log.info(f"STARTUP: {total:,} record pronti per sync")
+
 async def main():
     log.info("=== AgentSignal Syncer v2 — Railway -> Base44 ===")
     pool = await asyncpg.create_pool(
         DATABASE_URL, min_size=2, max_size=5, command_timeout=30
     )
+    await startup_reset_ids(pool)
     async with pool.acquire() as c:
         total   = await c.fetchval("SELECT COUNT(*) FROM companies") or 0
         scanned = await c.fetchval(
