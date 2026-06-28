@@ -652,10 +652,10 @@ def build_flat_tech_list(biz_stack: dict, tech_stack: list) -> list:
     return list(dict.fromkeys(tools))  # dedup mantenendo ordine
 
 
-def build_ai_signals_list(ai_signals: list) -> list:
+def build_buying_intent_signals(ai_signals: list) -> list:
     """
-    Lista di etichette LEGGIBILI per il campo ai_stack su Base44.
-    Formato: "AI Hiring Signal · careers" — NO snippet HTML grezzo.
+    Lista di etichette LEGGIBILI dei segnali AI — per Base44 buying_intent_signals (array).
+    Formato umano: "AI Hiring Signal · careers page"
     """
     SIGNAL_LABELS = {
         "ai_hiring":    "AI Hiring Signal",
@@ -664,14 +664,41 @@ def build_ai_signals_list(ai_signals: list) -> list:
         "ai_docs":      "AI in Documentation",
         "ai_changelog": "AI Changelog Update",
     }
+    PAGE_LABELS = {
+        "careers": "careers page", "jobs": "careers page",
+        "blog": "company blog", "product": "product page",
+        "features": "product page", "docs": "documentation",
+        "changelog": "changelog", "homepage": "homepage",
+    }
     seen   = set()
     result = []
     for s in sorted(ai_signals, key=lambda x: -x["weight"]):
-        label = f"{SIGNAL_LABELS.get(s['type'], s['type'])} · {s['page']}"
+        label = f"{SIGNAL_LABELS.get(s['type'], s['type'])} · {PAGE_LABELS.get(s['page'], s['page'])}"
         if label not in seen:
             seen.add(label)
             result.append(label)
-    return result[:8]  # max 8 segnali leggibili
+    return result[:8]
+
+# Alias per compatibilità
+def build_ai_signals_list(ai_signals: list) -> list:
+    return build_buying_intent_signals(ai_signals)
+
+
+def build_gap_signals(scores: dict) -> list:
+    """
+    Lista di gap tecnologici identificati — per Base44 acquisition_signals (array).
+    Utile per la sezione Buying Intent Signals nell'UI.
+    """
+    GAP_LABELS = {
+        "no_automation":   "No Automation Tool detected",
+        "no_ai_signal":    "No AI Signal detected",
+        "no_crm":          "No CRM detected",
+        "no_analytics":    "No Analytics Tool detected",
+        "no_monitoring":   "No Monitoring Tool detected",
+        "no_support_tool": "No Support Tool detected",
+    }
+    gaps = scores.get("_gaps", {})
+    return [GAP_LABELS[k] for k, v in gaps.items() if v and k in GAP_LABELS]
 
 
 def build_dna_summary(biz_stack: dict, tech_stack: list, ai_signals: list, scores: dict) -> str:
