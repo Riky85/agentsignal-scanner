@@ -617,8 +617,8 @@ async def scan_company(session, c):
     cname    = c.get("name", domain)
     start_ts = time.time()
 
-    # Ottieni/crea company
-    cid = await get_or_create_company(session, c)
+    # Usa ID esistente se già presente (dal feeder), altrimenti cerca/crea
+    cid = c.get("id") or await get_or_create_company(session, c)
     if not cid:
         stats["errors"] += 1
         return
