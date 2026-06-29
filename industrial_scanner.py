@@ -722,10 +722,20 @@ async def scan_company(session, c):
         scores   = compute_scores(sigs)
         best_opp = max(scores, key=scores.get) if scores else ""
 
+        # Genera opportunity PRIMA del PUT così possiamo includere deal value
+        opps = generate_opps(cid, cname, domain, sigs, scores)
+
+        # Best deal value dalla top opportunity
+        deal_min = opps[0]["estimated_deal_value_min"] if opps else 0
+        deal_max = opps[0]["estimated_deal_value_max"] if opps else 0
+        best_opp_type = opps[0]["opportunity_type"] if opps else best_opp
+
         # Enrich description da LLM se disponibile
         company_update = {**scores, "scan_status": "done",
                           "last_scan_date": datetime.now(timezone.utc).isoformat(),
-                          "top_opportunity": best_opp}
+                          "top_opportunity": best_opp_type,
+                          "estimated_deal_min": deal_min,
+                          "estimated_deal_max": deal_max}
         if llm_result.get("company_summary"):
             company_update["description"] = llm_result["company_summary"][:500]
         if llm_result.get("employees_estimate") and not c.get("employee_count"):
@@ -742,8 +752,7 @@ async def scan_company(session, c):
             await b44_post(session, "IndustrialSignal", s)
             await asyncio.sleep(0.07)
 
-        # Genera e salva opportunity
-        opps = generate_opps(cid, cname, domain, sigs, scores)
+        # Salva opportunity
         for o in opps:
             await b44_post(session, "IndustrialOpportunity", o)
             await asyncio.sleep(0.07)
