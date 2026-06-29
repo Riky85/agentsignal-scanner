@@ -796,26 +796,41 @@ async def scan_company(session, c):
         revenue_data = await fetch_revenue(session, domain, cname)
 
         # Enrich description da LLM se disponibile
-        company_update = {**scores, "scan_status": "done",
-                          "last_scan_date": datetime.now(timezone.utc).isoformat(),
-                          "top_opportunity": best_opp_type,
+        # NOTA: su Base44 via service token i campi STRING non si aggiornano via PUT
+        # Solo campi numerici/integer funzionano in update. Usiamo campi numerici.
+        # scan_status → scanned=1 (integer)
+        # revenue_range → annual_revenue_eur_k + annual_revenue_max_eur_k (K-EUR come numero)
+        company_update = {**scores,
+                          "scanned": 1,
                           "estimated_deal_value_min": deal_min,
                           "estimated_deal_value_max": deal_max}
 
-        # Revenue & employees (non sovrascrivere se già presenti)
-        if revenue_data.get("revenue_range") and not c.get("revenue_range"):
-            company_update["revenue_range"] = revenue_data["revenue_range"]
-        if revenue_data.get("employee_count") and not c.get("employee_count"):
-            emp = int(revenue_data["employee_count"])
-            company_update["employee_count"] = emp
-            sz = ("micro" if emp < 10 else "small" if emp < 50 else
-                  "medium" if emp < 250 else "large" if emp < 1000 else "enterprise")
-            company_update["company_size"] = sz
+        # Revenue come numero (K-EUR) — Apollo o stima da signals
+        rev_k = 0
+        rev_max_k = 0
+        if revenue_data.get("annual_revenue_eur_k"):
+            rev_k = int(revenue_data["annual_revenue_eur_k"])
+            rev_max_k = int(revenue_data.get("annual_revenue_max_eur_k", rev_k * 3))
+        elif revenue_data.get("revenue_range"):
+            # Converti stringa → numero K
+            import re as _re
+            m = _re.search(r"(\d[\d,.]*)", str(revenue_data["revenue_range"]).replace(",","."))
+            if m:
+                n = float(m.group(1))
+                unit = revenue_data["revenue_range"].lower()
+                if "b" in unit: rev_k = int(n * 1_000_000)
+                elif "m" in unit or "mln" in unit or "mio" in unit: rev_k = int(n * 1_000)
+                elif "k" in unit: rev_k = int(n)
+                else: rev_k = int(n / 1000)
+                rev_max_k = rev_k * 3
 
-        if llm_result.get("company_summary"):
-            company_update["description"] = llm_result["company_summary"][:500]
-        elif revenue_data.get("description") and not c.get("description"):
-            company_update["description"] = revenue_data["description"]
+        if rev_k > 0 and not c.get("annual_revenue_eur_k"):
+            company_update["annual_revenue_eur_k"] = rev_k
+            company_update["annual_revenue_max_eur_k"] = rev_max_k
+
+        # Employees
+        if revenue_data.get("employee_count") and not c.get("employee_count"):
+            company_update["employee_count"] = int(revenue_data["employee_count"])
         if llm_result.get("employees_estimate") and not c.get("employee_count") and not revenue_data.get("employee_count"):
             emp = llm_result["employees_estimate"]
             company_update["employee_count"] = emp
