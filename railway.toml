@@ -1,10 +1,10 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip install aiohttp"
+buildCommand = "pip install aiohttp beautifulsoup4 lxml"
 
 [deploy]
-startCommand = "python feeder_runner.py"
+startCommand = "MAX_SUBPAGES=10 CONCURRENCY=8 python mass_scanner_runner.py"
 healthcheckPath = "/"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 5
+restartPolicyMaxRetries = 10
