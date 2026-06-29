@@ -734,8 +734,8 @@ async def scan_company(session, c):
         company_update = {**scores, "scan_status": "done",
                           "last_scan_date": datetime.now(timezone.utc).isoformat(),
                           "top_opportunity": best_opp_type,
-                          "estimated_deal_min": deal_min,
-                          "estimated_deal_max": deal_max}
+                          "estimated_deal_value_min": deal_min,
+                          "estimated_deal_value_max": deal_max}
         if llm_result.get("company_summary"):
             company_update["description"] = llm_result["company_summary"][:500]
         if llm_result.get("employees_estimate") and not c.get("employee_count"):
