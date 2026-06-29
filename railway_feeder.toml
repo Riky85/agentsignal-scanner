@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip install aiohttp beautifulsoup4 lxml"
+buildCommand = "pip install aiohttp"
 
 [deploy]
 startCommand = "python feeder_runner.py"
