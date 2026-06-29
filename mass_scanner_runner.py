@@ -30,16 +30,27 @@ threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), Health).serve_fore
 
 
 async def load_pending(session, skip=0):
-    """Carica batch di aziende pending da Base44."""
-    url = f"{B44_BASE}/IndustrialCompany?scan_status=pending&limit={BATCH}&skip={skip}&fields=id,name,domain,country,industry"
-    try:
-        async with session.get(url, headers=HW,
-                               timeout=aiohttp.ClientTimeout(total=30)) as r:
-            if r.status == 200:
-                d = await r.json(content_type=None)
-                return d if isinstance(d, list) else []
-    except Exception as e:
-        log.warning(f"load_pending ERR: {e}")
+    """Carica batch di aziende da scansionare — scan_status=pending O null."""
+    # Prima prova con pending esplicito
+    for status_filter in ["pending", ""]:
+        if status_filter:
+            url = f"{B44_BASE}/IndustrialCompany?scan_status=pending&limit={BATCH}&skip={skip}&fields=id,name,domain,country,industry,scan_status"
+        else:
+            # Nessun filtro status — prende tutti e filtra in locale
+            url = f"{B44_BASE}/IndustrialCompany?limit={BATCH}&skip={skip}&fields=id,name,domain,country,industry,scan_status"
+        try:
+            async with session.get(url, headers=HW,
+                                   timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status == 200:
+                    d = await r.json(content_type=None)
+                    if isinstance(d, list):
+                        if status_filter == "":
+                            # filtra solo quelli non-done e non-scanning
+                            d = [c for c in d if c.get("scan_status") not in ("done","scanning")]
+                        if d:
+                            return d
+        except Exception as e:
+            log.warning(f"load_pending ERR ({status_filter}): {e}")
     return []
 
 
