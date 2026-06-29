@@ -3,7 +3,7 @@ builder = "NIXPACKS"
 buildCommand = "pip install aiohttp beautifulsoup4 lxml"
 
 [deploy]
-startCommand = "python industrial_feeder.py"
+startCommand = "python3 industrial_crawler.py"
 healthcheckPath = "/"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
