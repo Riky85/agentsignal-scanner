@@ -796,40 +796,29 @@ async def scan_company(session, c):
         revenue_data = await fetch_revenue(session, domain, cname)
 
         # Enrich description da LLM se disponibile
-        # NOTA: su Base44 via service token i campi STRING non si aggiornano via PUT
-        # Solo campi numerici/integer funzionano in update. Usiamo campi numerici.
-        # scan_status → scanned=1 (integer)
-        # revenue_range → annual_revenue_eur_k + annual_revenue_max_eur_k (K-EUR come numero)
+        # CAMPI CONFERMATI come scrivibili via PUT su B44 (service token):
+        # ✅ revenue (string), employee_count (number), estimated_deal_value_max (number)
+        # ✅ buying_intent_score, automation_readiness_score, robotics_opportunity_score
+        # ❌ scan_status, revenue_range, annual_revenue_eur_k (nuovi — non persistiti su record vecchi)
         company_update = {**scores,
-                          "scanned": 1,
                           "estimated_deal_value_min": deal_min,
                           "estimated_deal_value_max": deal_max}
 
-        # Revenue come numero (K-EUR) — Apollo o stima da signals
-        rev_k = 0
-        rev_max_k = 0
-        if revenue_data.get("annual_revenue_eur_k"):
-            rev_k = int(revenue_data["annual_revenue_eur_k"])
-            rev_max_k = int(revenue_data.get("annual_revenue_max_eur_k", rev_k * 3))
-        elif revenue_data.get("revenue_range"):
-            # Converti stringa → numero K
-            import re as _re
-            m = _re.search(r"(\d[\d,.]*)", str(revenue_data["revenue_range"]).replace(",","."))
-            if m:
-                n = float(m.group(1))
-                unit = revenue_data["revenue_range"].lower()
-                if "b" in unit: rev_k = int(n * 1_000_000)
-                elif "m" in unit or "mln" in unit or "mio" in unit: rev_k = int(n * 1_000)
-                elif "k" in unit: rev_k = int(n)
-                else: rev_k = int(n / 1000)
-                rev_max_k = rev_k * 3
+        # Revenue come stringa leggibile nel campo 'revenue' (già presente)
+        if not c.get("revenue"):
+            rev_str = ""
+            if revenue_data.get("revenue_range"):
+                rev_str = str(revenue_data["revenue_range"])[:80]
+            elif revenue_data.get("annual_revenue_eur_k"):
+                k = int(revenue_data["annual_revenue_eur_k"])
+                if k >= 1_000_000: rev_str = f"EUR {k//1000:.0f}M+"
+                elif k >= 1_000:   rev_str = f"EUR {k//1000:.0f}M"
+                else:              rev_str = f"EUR {k}K"
+            if rev_str:
+                company_update["revenue"] = rev_str
+                stats["revenue_found"] = stats.get("revenue_found", 0) + 1
 
-        if rev_k > 0 and not c.get("annual_revenue_eur_k"):
-            company_update["annual_revenue_eur_k"] = rev_k
-            company_update["annual_revenue_max_eur_k"] = rev_max_k
-            stats["revenue_found"] = stats.get("revenue_found", 0) + 1
-
-        # Employees
+        # Dipendenti
         if revenue_data.get("employee_count") and not c.get("employee_count"):
             company_update["employee_count"] = int(revenue_data["employee_count"])
         if llm_result.get("employees_estimate") and not c.get("employee_count") and not revenue_data.get("employee_count"):
