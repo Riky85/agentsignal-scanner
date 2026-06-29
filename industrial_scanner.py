@@ -827,6 +827,7 @@ async def scan_company(session, c):
         if rev_k > 0 and not c.get("annual_revenue_eur_k"):
             company_update["annual_revenue_eur_k"] = rev_k
             company_update["annual_revenue_max_eur_k"] = rev_max_k
+            stats["revenue_found"] = stats.get("revenue_found", 0) + 1
 
         # Employees
         if revenue_data.get("employee_count") and not c.get("employee_count"):
