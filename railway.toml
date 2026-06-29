@@ -3,7 +3,7 @@ builder = "NIXPACKS"
 buildCommand = "pip install aiohttp beautifulsoup4 lxml"
 
 [deploy]
-startCommand = "python industrial_runner.py"
+startCommand = "MAX_SUBPAGES=10 CONCURRENCY=6 python industrial_runner.py"
 healthcheckPath = "/"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
