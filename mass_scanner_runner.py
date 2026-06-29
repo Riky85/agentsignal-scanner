@@ -79,6 +79,7 @@ async def main():
                 async with sem:
                     try:
                         company = {
+                            "id":       c.get("id",""),       # ID B44 esistente
                             "domain":   c.get("domain",""),
                             "name":     c.get("name",""),
                             "country":  c.get("country",""),
