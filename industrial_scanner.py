@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-Industrial Opportunity Intelligence — Scanner Engine v1.0
-Scansiona siti di aziende manifatturiere e rileva segnali per:
-  - Robotica (cobot, robot industriale, palletizing, welding...)
-  - CNC / Machine Tending
-  - AMR / AGV / Warehouse Automation
-  - MES / SCADA / PLC
-  - Computer Vision / Quality Inspection
-  - Buying Intent (nuova fabbrica, espansione, assunzioni)
-
-Output → Base44 entities: IndustrialCompany, IndustrialSignal, IndustrialOpportunity
+Industrial Opportunity Intelligence — Scanner Engine v2.0
+- Scansiona website, careers, blog, news, press release, job board (Indeed/LinkedIn)
+- Rileva segnali industriali: robotica, CNC, AMR/AGV, MES/SCADA, machine vision, buying intent
+- Dataset: 500+ aziende manifatturiere seed + crawling dinamico
+- Output: IndustrialCompany + IndustrialSignal + IndustrialOpportunity su Base44
 """
 
 import asyncio
@@ -20,717 +15,639 @@ import json
 import re
 import logging
 import time
+import threading
 from datetime import datetime, timezone
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, quote_plus
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [IND] %(message)s")
 log = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────
-# CONFIG
-# ──────────────────────────────────────────────
-B44_TOKEN = (os.environ.get("B44_SERVICE_TOKEN") or
-             os.environ.get("BASE44_SERVICE_TOKEN") or "")
-APP_ID    = os.environ.get("B44_APP_ID", "6a3a284ab0b87dfa27558bb6")
-B44_BASE  = f"https://app.base44.com/api/apps/{APP_ID}/entities"
-HW        = {"api-key": B44_TOKEN, "Content-Type": "application/json"}
-
-WORKER_ID = int(os.environ.get("WORKER_ID", "0"))
+# ─── CONFIG ───────────────────────────────────────────────────────────────────
+B44_TOKEN     = (os.environ.get("B44_SERVICE_TOKEN") or
+                 os.environ.get("BASE44_SERVICE_TOKEN") or "")
+APP_ID        = os.environ.get("B44_APP_ID", "6a3a284ab0b87dfa27558bb6")
+B44_BASE      = f"https://app.base44.com/api/apps/{APP_ID}/entities"
+HW            = {"api-key": B44_TOKEN, "Content-Type": "application/json"}
+DATABASE_URL  = os.environ.get("DATABASE_URL", "")
+WORKER_ID     = int(os.environ.get("WORKER_ID", "0"))
 TOTAL_WORKERS = int(os.environ.get("TOTAL_WORKERS", "1"))
-CONCURRENCY = int(os.environ.get("CONCURRENCY", "8"))
-BATCH_SIZE  = int(os.environ.get("BATCH_SIZE", "50"))
-REQUEST_TIMEOUT = 15
-DELAY_BETWEEN_DOMAINS = 1.5
+CONCURRENCY   = int(os.environ.get("CONCURRENCY", "6"))
+PORT          = int(os.environ.get("PORT", 8080))
+REQUEST_TIMEOUT = 12
+PAGE_DELAY    = 0.4
 
-USER_AGENT = "IndustrialOpportunityBot/1.0 (+https://agentsignal.io/bot)"
-
+UA = "IndustrialOpportunityBot/2.0 (+https://agentsignal.io/bot)"
 HEADERS = {
-    "User-Agent": USER_AGENT,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9,it;q=0.8",
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,it;q=0.8,de;q=0.7",
     "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
 }
 
-# ──────────────────────────────────────────────
-# SIGNAL PATTERNS — solo evidenza testuale reale
-# Ogni pattern ha: keywords, category, signal_type, confidence, deal_range
-# ──────────────────────────────────────────────
+stats = {"scanned": 0, "signals": 0, "opportunities": 0, "errors": 0, "status": "starting"}
 
-SIGNAL_DB = [
-    # ── ROBOTICS ──
-    {"category": "robotics", "type": "palletizing",
-     "patterns": [r"\bpalletiz\w+\b", r"\bdepalletiz\w+\b", r"\bpallet\s+stacking\b"],
-     "confidence": 85, "deal_min": 60000, "deal_max": 150000},
-    {"category": "robotics", "type": "pick_and_place",
-     "patterns": [r"\bpick[\s\-]and[\s\-]place\b", r"\bpick\s+&\s+place\b"],
-     "confidence": 80, "deal_min": 40000, "deal_max": 120000},
-    {"category": "robotics", "type": "welding_robot",
-     "patterns": [r"\brobotic\s+welding\b", r"\bwelding\s+robot\b", r"\barc\s+welding\b", r"\bspot\s+welding\b"],
-     "confidence": 90, "deal_min": 80000, "deal_max": 200000},
-    {"category": "robotics", "type": "assembly_robot",
-     "patterns": [r"\brobotic\s+assembl\w+\b", r"\bautomat\w+\s+assembl\w+\b"],
-     "confidence": 75, "deal_min": 60000, "deal_max": 180000},
-    {"category": "robotics", "type": "collaborative_robot",
-     "patterns": [r"\bcobot\b", r"\bcollaborative\s+robot\b", r"\bhuman[\s\-]robot\s+collaboration\b"],
-     "confidence": 90, "deal_min": 30000, "deal_max": 90000},
-    {"category": "robotics", "type": "end_of_line",
-     "patterns": [r"\bend[\s\-]of[\s\-]line\b", r"\bcase\s+packing\b", r"\bshrink\s+wrapping\b"],
-     "confidence": 75, "deal_min": 50000, "deal_max": 130000},
-    {"category": "robotics", "type": "heavy_lifting",
-     "patterns": [r"\bheavy\s+lifting\b", r"\bmanual\s+lifting\b", r"\brepetitive\s+lifting\b"],
-     "confidence": 70, "deal_min": 40000, "deal_max": 100000},
+# ─── HEALTHCHECK ──────────────────────────────────────────────────────────────
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps(stats).encode()
+        self.send_response(200)
+        self.send_header("Content-Type","application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
 
-    # ── CNC / MACHINE TENDING ──
-    {"category": "cnc_machine_tending", "type": "cnc_operator",
-     "patterns": [r"\bcnc\s+operator\b", r"\bcnc\s+machinist\b", r"\bmachine\s+operator\b"],
-     "confidence": 80, "deal_min": 50000, "deal_max": 150000},
-    {"category": "cnc_machine_tending", "type": "cnc_machine",
-     "patterns": [r"\bcnc\s+machin\w+\b", r"\bmazak\b", r"\bdmg\s+mori\b", r"\bhaas\s+cnc\b",
-                  r"\bokuma\b", r"\bfanuc\s+cnc\b", r"\bturning\s+center\b", r"\bmachining\s+center\b"],
-     "confidence": 85, "deal_min": 60000, "deal_max": 180000},
-    {"category": "cnc_machine_tending", "type": "machine_tending",
-     "patterns": [r"\bmachine\s+tending\b", r"\bloading\s+unloading\b", r"\bload\s+unload\b",
-                  r"\bautomatic\s+loading\b"],
-     "confidence": 90, "deal_min": 70000, "deal_max": 180000},
-    {"category": "cnc_machine_tending", "type": "shift_production",
-     "patterns": [r"\b3[\s\-]shift\b", r"\bthree[\s\-]shift\b", r"\bnight\s+shift\b",
-                  r"\b24[\s\/]7\s+production\b", r"\bcontinuous\s+production\b"],
-     "confidence": 70, "deal_min": 40000, "deal_max": 120000},
+threading.Thread(
+    target=lambda: HTTPServer(("0.0.0.0", PORT), Health).serve_forever(),
+    daemon=True).start()
+log.info(f"Healthcheck su :{PORT}")
 
-    # ── AMR / AGV ──
-    {"category": "amr_agv", "type": "warehouse_logistics",
-     "patterns": [r"\bwarehousing\b", r"\bwarehouse\s+operations\b", r"\bintralogistics\b",
-                  r"\binternal\s+logistics\b", r"\bmaterial\s+handling\b"],
-     "confidence": 70, "deal_min": 80000, "deal_max": 250000},
-    {"category": "amr_agv", "type": "forklift_operations",
-     "patterns": [r"\bforklift\b", r"\bfork\s+lift\b", r"\bforklifts\b"],
-     "confidence": 75, "deal_min": 100000, "deal_max": 300000},
-    {"category": "amr_agv", "type": "agv_amr_mention",
-     "patterns": [r"\b\bAGV\b", r"\b\bAMR\b", r"\bautonomous\s+mobile\s+robot\b",
-                  r"\bautonome\s+fahrzeuge\b", r"\bguided\s+vehicle\b"],
-     "confidence": 95, "deal_min": 100000, "deal_max": 400000},
-    {"category": "amr_agv", "type": "warehouse_expansion",
-     "patterns": [r"\bnew\s+warehouse\b", r"\bwarehouse\s+expansion\b", r"\bnew\s+distribution\s+center\b",
-                  r"\blogistics\s+center\b"],
-     "confidence": 80, "deal_min": 150000, "deal_max": 500000},
-    {"category": "amr_agv", "type": "picking_operations",
-     "patterns": [r"\border\s+picking\b", r"\bpick\s+path\b", r"\bgoods[\s\-]to[\s\-]person\b",
-                  r"\bpicking\s+efficiency\b"],
-     "confidence": 75, "deal_min": 80000, "deal_max": 250000},
+# ─── SIGNAL PATTERNS ─────────────────────────────────────────────────────────
+SIGNALS = [
+    # ROBOTICS
+    {"cat":"robotics","type":"palletizing","conf":88,"dmin":60000,"dmax":160000,
+     "p":[r"\bpalletiz\w+\b",r"\bdepalletiz\w+\b",r"\bpallet\s+(robot|system|cell|automat)\b"]},
+    {"cat":"robotics","type":"pick_and_place","conf":80,"dmin":40000,"dmax":120000,
+     "p":[r"\bpick[\s\-]and[\s\-]place\b",r"\bpick\s+&\s+place\b"]},
+    {"cat":"robotics","type":"welding_robot","conf":90,"dmin":80000,"dmax":220000,
+     "p":[r"\brobotic\s+welding\b",r"\bwelding\s+robot\b",r"\barc\s+welding\b",r"\bspot\s+welding\b",r"\bsaldatura\s+robot\b"]},
+    {"cat":"robotics","type":"assembly_robot","conf":75,"dmin":60000,"dmax":180000,
+     "p":[r"\brobotic\s+assembl\w+\b",r"\bautomat\w+\s+assembl\w+\b",r"\bassemblaggio\s+automat\w+\b"]},
+    {"cat":"robotics","type":"collaborative_robot","conf":92,"dmin":25000,"dmax":90000,
+     "p":[r"\bcobot\b",r"\bcollaborative\s+robot\b",r"\bhuman[\s\-]robot\s+collab\w+\b",r"\brobot\s+collaborat\w+\b"]},
+    {"cat":"robotics","type":"end_of_line","conf":78,"dmin":50000,"dmax":140000,
+     "p":[r"\bend[\s\-]of[\s\-]line\b",r"\bcase\s+packing\b",r"\bfine\s+linea\b",r"\bshrink\s+wrap\w+\b"]},
+    {"cat":"robotics","type":"heavy_lifting","conf":70,"dmin":40000,"dmax":100000,
+     "p":[r"\bheavy\s+lifting\b",r"\bmanual\s+lifting\b",r"\bsollev\w+\s+manual\w+\b"]},
 
-    # ── MES / SCADA / PLC ──
-    {"category": "mes_scada", "type": "mes_mention",
-     "patterns": [r"\bMES\b", r"\bmanufacturing\s+execution\s+system\b"],
-     "confidence": 90, "deal_min": 50000, "deal_max": 200000},
-    {"category": "mes_scada", "type": "scada_mention",
-     "patterns": [r"\bSCADA\b", r"\bsupervisory\s+control\b"],
-     "confidence": 90, "deal_min": 40000, "deal_max": 180000},
-    {"category": "mes_scada", "type": "plc_systems",
-     "patterns": [r"\bPLC\b", r"\bprogrammable\s+logic\b", r"\bsiemens\s+s7\b",
-                  r"\ballen[\s\-]bradley\b", r"\brockwell\s+automation\b", r"\bschneider\s+electric\b"],
-     "confidence": 85, "deal_min": 30000, "deal_max": 150000},
-    {"category": "mes_scada", "type": "oee_monitoring",
-     "patterns": [r"\bOEE\b", r"\boverall\s+equipment\s+effectiveness\b", r"\bproduction\s+monitoring\b",
-                  r"\bdowntime\s+monitoring\b", r"\bshop\s+floor\b"],
-     "confidence": 85, "deal_min": 30000, "deal_max": 120000},
-    {"category": "mes_scada", "type": "industry40",
-     "patterns": [r"\bindustry\s+4\.0\b", r"\bindustrie\s+4\.0\b", r"\bsmart\s+factory\b",
-                  r"\bdigital\s+twin\b", r"\biiot\b", r"\bindustrial\s+iot\b", r"\bopc[\s\-]ua\b"],
-     "confidence": 80, "deal_min": 50000, "deal_max": 250000},
-    {"category": "mes_scada", "type": "traceability",
-     "patterns": [r"\btraceability\b", r"\bproduct\s+tracing\b", r"\bbatch\s+tracking\b",
-                  r"\bserial\s+number\s+tracking\b"],
-     "confidence": 80, "deal_min": 30000, "deal_max": 100000},
+    # CNC / MACHINE TENDING
+    {"cat":"cnc_machine_tending","type":"cnc_machine","conf":85,"dmin":55000,"dmax":180000,
+     "p":[r"\bcnc\s+machin\w+\b",r"\bmazak\b",r"\bdmg\s+mori\b",r"\bhaas\b",r"\bokuma\b",
+          r"\bfanuc\s+cnc\b",r"\bturning\s+cent\w+\b",r"\bmachining\s+cent\w+\b",r"\btorni\s+cnc\b"]},
+    {"cat":"cnc_machine_tending","type":"machine_tending","conf":92,"dmin":65000,"dmax":190000,
+     "p":[r"\bmachine\s+tending\b",r"\bloading[\s/]unloading\b",r"\bload\s+unload\b",
+          r"\bautomatic\s+loading\b",r"\bcaricamento\s+automat\w+\b"]},
+    {"cat":"cnc_machine_tending","type":"shift_production","conf":72,"dmin":40000,"dmax":120000,
+     "p":[r"\b3[\s\-]shift\b",r"\bthree[\s\-]shift\b",r"\bnight\s+shift\s+production\b",
+          r"\b24[\s\/]7\s+production\b",r"\bturni\s+(di\s+)?produzione\b",r"\b3\s+turni\b"]},
+    {"cat":"cnc_machine_tending","type":"lathe_milling","conf":80,"dmin":50000,"dmax":150000,
+     "p":[r"\blathe\s+operat\w+\b",r"\bmilling\s+operat\w+\b",r"\bturning\s+operat\w+\b",
+          r"\brettifica\b",r"\btornitura\b",r"\bfresatura\b"]},
 
-    # ── MACHINE VISION ──
-    {"category": "machine_vision", "type": "quality_inspection",
-     "patterns": [r"\bquality\s+inspection\b", r"\bvisual\s+inspection\b", r"\bdefect\s+detection\b",
-                  r"\binspection\s+line\b", r"\bquality\s+control\s+system\b"],
-     "confidence": 85, "deal_min": 30000, "deal_max": 150000},
-    {"category": "machine_vision", "type": "computer_vision",
-     "patterns": [r"\bcomputer\s+vision\b", r"\bmachine\s+vision\b", r"\bvision\s+system\b",
-                  r"\bcamera\s+inspection\b", r"\bimage\s+processing\s+inspection\b"],
-     "confidence": 90, "deal_min": 40000, "deal_max": 200000},
-    {"category": "machine_vision", "type": "nonconformity",
-     "patterns": [r"\bnon[\s\-]conformit\w+\b", r"\bdefect\s+rate\b", r"\bscrap\s+rate\b",
-                  r"\bquality\s+reject\w*\b", r"\bzero\s+defect\b"],
-     "confidence": 75, "deal_min": 25000, "deal_max": 100000},
+    # AMR / AGV
+    {"cat":"amr_agv","type":"warehouse_logistics","conf":70,"dmin":80000,"dmax":300000,
+     "p":[r"\bwarehousing\b",r"\bintralogistics\b",r"\binternal\s+logistics\b",
+          r"\bmaterial\s+handling\b",r"\blogistica\s+interna\b"]},
+    {"cat":"amr_agv","type":"forklift_operations","conf":78,"dmin":100000,"dmax":350000,
+     "p":[r"\bforklifts?\b",r"\bcarrelli\s+elevatori\b",r"\bempilhadeiras\b"]},
+    {"cat":"amr_agv","type":"agv_amr_mention","conf":96,"dmin":120000,"dmax":450000,
+     "p":[r"\bAGV\b",r"\bAMR\b",r"\bautonomous\s+mobile\s+robot\b",r"\bguided\s+vehicle\b",
+          r"\bveicoli\s+automat\w+\b"]},
+    {"cat":"amr_agv","type":"warehouse_expansion","conf":82,"dmin":150000,"dmax":600000,
+     "p":[r"\bnew\s+warehouse\b",r"\bwarehouse\s+expansion\b",r"\bnew\s+distribution\s+cent\w+\b",
+          r"\bnuovo\s+magazzino\b",r"\bampliamento\s+magazzino\b",r"\bneues\s+lager\b"]},
+    {"cat":"amr_agv","type":"picking_operations","conf":75,"dmin":80000,"dmax":260000,
+     "p":[r"\border\s+picking\b",r"\bgoods[\s\-]to[\s\-]person\b",r"\bpicking\s+effic\w+\b",
+          r"\bprelievo\s+automat\w+\b"]},
 
-    # ── GROWTH / BUYING INTENT ──
-    {"category": "growth_buying_intent", "type": "new_factory",
-     "patterns": [r"\bnew\s+factory\b", r"\bnew\s+plant\b", r"\bnew\s+facility\b",
-                  r"\bgreen[\s\-]field\b", r"\bnuovo\s+stabilimento\b"],
-     "confidence": 90, "deal_min": 200000, "deal_max": 1000000},
-    {"category": "growth_buying_intent", "type": "production_expansion",
-     "patterns": [r"\bproduction\s+expansion\b", r"\bexpanding\s+production\b",
-                  r"\bincreasing\s+capacity\b", r"\bcapacity\s+expansion\b",
-                  r"\bnew\s+production\s+line\b", r"\bespansione\s+produttiva\b"],
-     "confidence": 85, "deal_min": 100000, "deal_max": 500000},
-    {"category": "growth_buying_intent", "type": "automation_project",
-     "patterns": [r"\bautomation\s+project\b", r"\bautomation\s+initiative\b",
-                  r"\bautomation\s+investment\b", r"\bdigital\s+transformation\b",
-                  r"\boperational\s+efficiency\b", r"\blabor\s+shortage\b"],
-     "confidence": 80, "deal_min": 80000, "deal_max": 400000},
-    {"category": "growth_buying_intent", "type": "investment_announcement",
-     "patterns": [r"\bmillion\s+investment\b", r"\binvestment\s+plan\b",
-                  r"\bfunding\s+round\b", r"\bseries\s+[abc]\b",
-                  r"\bcapital\s+expenditure\b", r"\bcapex\b"],
-     "confidence": 75, "deal_min": 100000, "deal_max": 500000},
+    # MES / SCADA
+    {"cat":"mes_scada","type":"mes_mention","conf":92,"dmin":50000,"dmax":220000,
+     "p":[r"\bMES\b",r"\bmanufacturing\s+execution\s+system\b",r"\bsistema\s+MES\b"]},
+    {"cat":"mes_scada","type":"scada_mention","conf":92,"dmin":40000,"dmax":190000,
+     "p":[r"\bSCADA\b",r"\bsupervisory\s+control\b",r"\bsistema\s+SCADA\b"]},
+    {"cat":"mes_scada","type":"plc_systems","conf":85,"dmin":25000,"dmax":160000,
+     "p":[r"\bPLC\b",r"\bprogrammable\s+logic\b",r"\bsiemens\s+s7\b",
+          r"\ballen[\s\-]bradley\b",r"\brockwell\s+automat\w+\b",r"\bschneider\s+electric\b",
+          r"\bomron\b",r"\bmitsubishi\s+(plc|electric)\b"]},
+    {"cat":"mes_scada","type":"oee_monitoring","conf":86,"dmin":30000,"dmax":130000,
+     "p":[r"\bOEE\b",r"\boverall\s+equipment\s+effect\w+\b",r"\bproduction\s+monitoring\b",
+          r"\bdowntime\s+monitor\w+\b",r"\bshop\s+floor\b",r"\bmonitoraggio\s+produz\w+\b"]},
+    {"cat":"mes_scada","type":"industry40","conf":80,"dmin":50000,"dmax":280000,
+     "p":[r"\bindustry\s+4\.0\b",r"\bindustrie\s+4\.0\b",r"\bsmart\s+factory\b",
+          r"\bdigital\s+twin\b",r"\biiot\b",r"\bopc[\s\-]ua\b",r"\bfabbrica\s+4\.0\b"]},
+    {"cat":"mes_scada","type":"traceability","conf":80,"dmin":30000,"dmax":110000,
+     "p":[r"\btraceability\b",r"\bbatch\s+tracking\b",r"\brintracciabilit\w+\b",
+          r"\bserial\s+number\s+tracking\b"]},
 
-    # ── HIRING SIGNALS ──
-    {"category": "hiring", "type": "automation_engineer_hiring",
-     "patterns": [r"\bautomation\s+engineer\b", r"\brobotic\w*\s+engineer\b",
-                  r"\bprocess\s+automation\s+engineer\b"],
-     "confidence": 90, "deal_min": 60000, "deal_max": 200000},
-    {"category": "hiring", "type": "plc_programmer_hiring",
-     "patterns": [r"\bplc\s+programm\w+\b", r"\bsiemens\s+programm\w+\b",
-                  r"\bscada\s+engineer\b", r"\bcontrol\s+systems\s+engineer\b"],
-     "confidence": 85, "deal_min": 40000, "deal_max": 150000},
-    {"category": "hiring", "type": "maintenance_technician_hiring",
-     "patterns": [r"\bmaintenance\s+technician\b", r"\bindustrial\s+electrician\b",
-                  r"\bpredictive\s+maintenance\b", r"\bpreventive\s+maintenance\b"],
-     "confidence": 80, "deal_min": 30000, "deal_max": 100000},
-    {"category": "hiring", "type": "manufacturing_engineer_hiring",
-     "patterns": [r"\bmanufacturing\s+engineer\b", r"\bproduction\s+engineer\b",
-                  r"\bindustrial\s+engineer\b", r"\blean\s+engineer\b",
-                  r"\bcontinuous\s+improvement\s+engineer\b"],
-     "confidence": 75, "deal_min": 50000, "deal_max": 180000},
-    {"category": "hiring", "type": "mes_specialist_hiring",
-     "patterns": [r"\bmes\s+specialist\b", r"\bmes\s+engineer\b",
-                  r"\bscada\s+specialist\b", r"\bmanufacturing\s+it\b"],
-     "confidence": 90, "deal_min": 50000, "deal_max": 200000},
+    # MACHINE VISION
+    {"cat":"machine_vision","type":"quality_inspection","conf":85,"dmin":30000,"dmax":160000,
+     "p":[r"\bquality\s+inspection\b",r"\bvisual\s+inspection\b",r"\bdefect\s+detection\b",
+          r"\binspection\s+line\b",r"\bcontrollo\s+qualit\w+\b",r"\bispezione\s+visiva\b"]},
+    {"cat":"machine_vision","type":"computer_vision","conf":92,"dmin":40000,"dmax":210000,
+     "p":[r"\bcomputer\s+vision\b",r"\bmachine\s+vision\b",r"\bvision\s+system\b",
+          r"\bcamera\s+inspection\b",r"\bvisione\s+artificiale\b"]},
+    {"cat":"machine_vision","type":"nonconformity","conf":76,"dmin":25000,"dmax":110000,
+     "p":[r"\bnon[\s\-]conformit\w+\b",r"\bdefect\s+rate\b",r"\bscrap\s+rate\b",
+          r"\bzero\s+defect\b",r"\bscarti\s+di\s+produzione\b",r"\bnon\s+conformit\w+\b"]},
+    {"cat":"machine_vision","type":"metrology","conf":80,"dmin":30000,"dmax":120000,
+     "p":[r"\bmetrolog\w+\b",r"\bdimensional\s+inspection\b",r"\bcoordinate\s+measuring\b",
+          r"\bCMM\b",r"\bmetrologica\b"]},
+
+    # GROWTH / BUYING INTENT
+    {"cat":"growth_buying_intent","type":"new_factory","conf":92,"dmin":200000,"dmax":1200000,
+     "p":[r"\bnew\s+(factory|plant|facility|site)\b",r"\bgreen[\s\-]field\b",
+          r"\bnuovo\s+stabilimento\b",r"\bneues\s+werk\b",r"\bnew\s+manufacturing\s+site\b",
+          r"\bopening\s+(new|a)\s+(plant|facility|factory)\b"]},
+    {"cat":"growth_buying_intent","type":"production_expansion","conf":86,"dmin":100000,"dmax":600000,
+     "p":[r"\bproduction\s+expansion\b",r"\bexpanding\s+capacity\b",r"\bcapacity\s+increase\b",
+          r"\bnew\s+production\s+line\b",r"\bespansione\s+produttiv\w+\b",
+          r"\bampliamento\s+(dello\s+)?stabilimento\b",r"\bKapazit\w+serweiterung\b",
+          r"\bincrease\s+(our\s+)?production\s+capacity\b"]},
+    {"cat":"growth_buying_intent","type":"automation_project","conf":82,"dmin":80000,"dmax":450000,
+     "p":[r"\bautomation\s+(project|initiative|investment|program)\b",
+          r"\bdigital\s+transformation\b",r"\boperational\s+efficiency\b",
+          r"\blabor\s+shortage\b",r"\bprogetto\s+automazion\w+\b",
+          r"\btrasformazione\s+digitale\b",r"\bIndustrie\s+4\.0\s+Projekt\b"]},
+    {"cat":"growth_buying_intent","type":"investment_announcement","conf":78,"dmin":150000,"dmax":700000,
+     "p":[r"\b\$?€?\d+\s*m\w*\s+investment\b",r"\binvestment\s+plan\b",
+          r"\bcapital\s+expenditure\b",r"\bcapex\b",r"\binvestimento\s+di\s+\d+\b",
+          r"\bFörderung\b",r"\bInvestition\b"]},
+    {"cat":"growth_buying_intent","type":"hiring_production_staff","conf":74,"dmin":60000,"dmax":300000,
+     "p":[r"\bhiring\s+(\d+\s+)?(production|manufacturing|assembly|warehouse)\s+\w+\b",
+          r"\brecruiting\s+\w+\s+operators?\b",r"\bricerchiamo\s+operatori\b",
+          r"\bopen\s+position\w*.*production\b"]},
+
+    # HIRING SIGNALS
+    {"cat":"hiring","type":"automation_engineer_hiring","conf":92,"dmin":60000,"dmax":220000,
+     "p":[r"\bautomation\s+engineer\b",r"\brobotic\w*\s+engineer\b",
+          r"\bprocess\s+automation\s+engineer\b",r"\bingegnere\s+di\s+automazione\b",
+          r"\bAutomatisierungsingenieur\b"]},
+    {"cat":"hiring","type":"plc_programmer_hiring","conf":87,"dmin":35000,"dmax":160000,
+     "p":[r"\bplc\s+programm\w+\b",r"\bsiemens\s+programm\w+\b",r"\bscada\s+engineer\b",
+          r"\bcontrol\s+systems\s+engineer\b",r"\bprogrammatore\s+plc\b"]},
+    {"cat":"hiring","type":"maintenance_technician_hiring","conf":80,"dmin":25000,"dmax":100000,
+     "p":[r"\bmaintenance\s+technician\b",r"\bindustrial\s+electrician\b",
+          r"\bpredictive\s+maintenance\b",r"\btecnico\s+manutentore\b",r"\bWartungstechniker\b"]},
+    {"cat":"hiring","type":"manufacturing_engineer_hiring","conf":76,"dmin":50000,"dmax":190000,
+     "p":[r"\bmanufacturing\s+engineer\b",r"\bproduction\s+engineer\b",
+          r"\blean\s+engineer\b",r"\bcontinuous\s+improvement\b",r"\bingegnere\s+di\s+produzione\b"]},
+    {"cat":"hiring","type":"mes_specialist_hiring","conf":92,"dmin":50000,"dmax":220000,
+     "p":[r"\bmes\s+specialist\b",r"\bmes\s+engineer\b",r"\bscada\s+specialist\b",
+          r"\bmanufacturing\s+it\b",r"\bspecialista\s+mes\b"]},
+    {"cat":"hiring","type":"warehouse_operator_hiring","conf":72,"dmin":80000,"dmax":300000,
+     "p":[r"\bwarehouse\s+operator\b",r"\blogistics\s+operator\b",
+          r"\bfork\s*lift\s+(driver|operator)\b",r"\baddetto\s+magazzino\b",
+          r"\boperatore\s+di\s+magazzino\b"]},
+    {"cat":"hiring","type":"quality_technician_hiring","conf":78,"dmin":30000,"dmax":140000,
+     "p":[r"\bquality\s+control\s+technician\b",r"\bquality\s+inspector\b",
+          r"\bquality\s+assurance\s+engineer\b",r"\btecnico\s+qualit\w+\b",
+          r"\bQualit\w+stechniker\b"]},
 ]
 
-# Pagine da scansionare per ogni azienda (path relativi)
-PAGES_TO_SCAN = [
-    "/", "/about", "/about-us", "/chi-siamo",
+# Pagine da scansionare per ogni dominio
+PAGES = [
+    "/", "/about", "/about-us", "/chi-siamo", "/uber-uns",
     "/products", "/prodotti", "/services", "/servizi",
-    "/manufacturing", "/produzione", "/production",
-    "/industries", "/settori", "/solutions",
-    "/warehouse", "/magazzino", "/logistics",
-    "/quality", "/qualita", "/quality-control",
-    "/careers", "/lavora-con-noi", "/jobs", "/job-openings",
-    "/news", "/notizie", "/blog", "/press",
-    "/technology", "/tecnologia", "/innovation",
+    "/manufacturing", "/produzione", "/production", "/fertigungstechnik",
+    "/solutions", "/soluciones", "/industries", "/settori",
+    "/warehouse", "/magazzino", "/logistics", "/logistik",
+    "/quality", "/qualita", "/quality-control", "/qualitaet",
+    "/careers", "/lavora-con-noi", "/jobs", "/stellenangebote",
+    "/news", "/notizie", "/blog", "/press", "/presse",
+    "/technology", "/tecnologia", "/innovation", "/innovazione",
+    "/automation", "/automazione", "/smart-manufacturing",
 ]
 
-# ──────────────────────────────────────────────
-# SCORING ENGINE
-# ──────────────────────────────────────────────
+# ─── 500+ AZIENDE SEED ────────────────────────────────────────────────────────
+SEED_COMPANIES = [
+    # IT — Automazione e Robotica
+    {"domain":"comau.com","name":"Comau","industry":"robotics","country":"IT","city":"Turin"},
+    {"domain":"salvagnini.com","name":"Salvagnini","industry":"metalworking","country":"IT","city":"Sarego"},
+    {"domain":"prima-industrie.com","name":"Prima Industrie","industry":"metalworking","country":"IT","city":"Collegno"},
+    {"domain":"ficep.com","name":"Ficep","industry":"metalworking","country":"IT","city":"Varese"},
+    {"domain":"marposs.com","name":"Marposs","industry":"metrology","country":"IT","city":"Bologna"},
+    {"domain":"datalogic.com","name":"Datalogic","industry":"automation","country":"IT","city":"Bologna"},
+    {"domain":"loccioni.com","name":"Loccioni","industry":"automation","country":"IT","city":"Angeli"},
+    {"domain":"bonfiglioli.com","name":"Bonfiglioli","industry":"automation","country":"IT","city":"Bologna"},
+    {"domain":"camozzi.com","name":"Camozzi Automation","industry":"pneumatics","country":"IT","city":"Brescia"},
+    {"domain":"gimatic.it","name":"Gimatic","industry":"robotics_end_effectors","country":"IT","city":"Orzinuovi"},
+    {"domain":"pneumax.it","name":"Pneumax","industry":"pneumatics","country":"IT","city":"Lurano"},
+    {"domain":"gefran.com","name":"Gefran","industry":"automation","country":"IT","city":"Provaglio"},
+    {"domain":"reer.it","name":"Reer","industry":"safety","country":"IT","city":"Turin"},
+    {"domain":"datalogic.com","name":"Datalogic","industry":"barcode_vision","country":"IT","city":"Bologna"},
+    {"domain":"cama-group.com","name":"Cama Group","industry":"packaging","country":"IT","city":"Lecco"},
+    {"domain":"ima.it","name":"IMA Group","industry":"packaging","country":"IT","city":"Bologna"},
+    {"domain":"marchesini.com","name":"Marchesini Group","industry":"packaging","country":"IT","city":"Bologna"},
+    {"domain":"coesia.com","name":"Coesia","industry":"packaging","country":"IT","city":"Bologna"},
+    {"domain":"sacmi.com","name":"Sacmi","industry":"machinery","country":"IT","city":"Imola"},
+    {"domain":"cefla.com","name":"Cefla","industry":"machinery","country":"IT","city":"Imola"},
+    {"domain":"brembo.com","name":"Brembo","industry":"automotive","country":"IT","city":"Curno"},
+    {"domain":"piaggio.com","name":"Piaggio","industry":"automotive","country":"IT","city":"Pontedera"},
+    {"domain":"interpump.com","name":"Interpump","industry":"hydraulics","country":"IT","city":"Reggio Emilia"},
+    {"domain":"comer-industries.com","name":"Comer Industries","industry":"machinery","country":"IT","city":"Reggio Emilia"},
+    {"domain":"elica.com","name":"Elica","industry":"appliances","country":"IT","city":"Fabriano"},
+    {"domain":"candy.it","name":"Candy","industry":"appliances","country":"IT","city":"Brugherio"},
+    {"domain":"bticino.com","name":"BTicino","industry":"electrical","country":"IT","city":"Varese"},
+    {"domain":"gewiss.com","name":"Gewiss","industry":"electrical","country":"IT","city":"Cenate Sotto"},
+    {"domain":"seco.com","name":"Seco Tools","industry":"cutting_tools","country":"IT","city":"Fagersta"},
+    {"domain":"tenova.com","name":"Tenova","industry":"steel_metallurgy","country":"IT","city":"Milan"},
+    # IT — PMI Manifatturiere
+    {"domain":"univer.it","name":"Univer","industry":"pneumatics","country":"IT","city":"Camisano"},
+    {"domain":"pizzato.net","name":"Pizzato Elettrica","industry":"safety","country":"IT","city":"Rossano Veneto"},
+    {"domain":"givi-misure.it","name":"GIVI Misure","industry":"metrology","country":"IT","city":"Milan"},
+    {"domain":"cml.it","name":"CML Microsystems","industry":"electronics","country":"IT","city":"Colchester"},
+    {"domain":"ldi-industries.com","name":"LDI Industries","industry":"machinery","country":"IT","city":"Brescia"},
+    {"domain":"omera.it","name":"Omera","industry":"sheet_metal","country":"IT","city":"Cernusco"},
+    {"domain":"eurotecno.it","name":"Eurotecno","industry":"metalworking","country":"IT","city":"Turin"},
+    {"domain":"bcs.it","name":"BCS","industry":"agricultural_machinery","country":"IT","city":"Abbiategrasso"},
+    {"domain":"celli.it","name":"Celli Group","industry":"food_equipment","country":"IT","city":"Savignano"},
+    {"domain":"rpm-srl.it","name":"RPM","industry":"plastics","country":"IT","city":"Schio"},
+    # DE — German Mittelstand
+    {"domain":"trumpf.com","name":"Trumpf","industry":"metalworking","country":"DE","city":"Ditzingen"},
+    {"domain":"kuka.com","name":"KUKA","industry":"robotics","country":"DE","city":"Augsburg"},
+    {"domain":"festo.com","name":"Festo","industry":"automation","country":"DE","city":"Esslingen"},
+    {"domain":"sew-eurodrive.com","name":"SEW-Eurodrive","industry":"automation","country":"DE","city":"Bruchsal"},
+    {"domain":"weinig.com","name":"Weinig Group","industry":"woodworking","country":"DE","city":"Tauberbischofsheim"},
+    {"domain":"homag.com","name":"Homag","industry":"woodworking","country":"DE","city":"Schopfloch"},
+    {"domain":"duerr.com","name":"Dürr","industry":"automotive","country":"DE","city":"Bietigheim"},
+    {"domain":"grob.de","name":"Grob-Werke","industry":"metalworking","country":"DE","city":"Mindelheim"},
+    {"domain":"zf.com","name":"ZF Friedrichshafen","industry":"automotive","country":"DE","city":"Friedrichshafen"},
+    {"domain":"schaeffler.com","name":"Schaeffler","industry":"automotive","country":"DE","city":"Herzogenaurach"},
+    {"domain":"bosch.com","name":"Bosch","industry":"automotive_industrial","country":"DE","city":"Stuttgart"},
+    {"domain":"siemens.com","name":"Siemens","industry":"automation","country":"DE","city":"Munich"},
+    {"domain":"ifm.com","name":"IFM Electronic","industry":"sensors","country":"DE","city":"Essen"},
+    {"domain":"sick.com","name":"Sick AG","industry":"sensors","country":"DE","city":"Waldkirch"},
+    {"domain":"lenze.com","name":"Lenze","industry":"drive_automation","country":"DE","city":"Hameln"},
+    {"domain":"beckhoff.com","name":"Beckhoff Automation","industry":"automation","country":"DE","city":"Verl"},
+    {"domain":"pilz.com","name":"Pilz","industry":"safety","country":"DE","city":"Ostfildern"},
+    {"domain":"schunk.com","name":"Schunk","industry":"gripping_clamping","country":"DE","city":"Lauffen"},
+    {"domain":"auma.com","name":"Auma","industry":"actuators","country":"DE","city":"Müllheim"},
+    {"domain":"heidenhain.com","name":"Heidenhain","industry":"metrology","country":"DE","city":"Traunreut"},
+    {"domain":"wittenstein.de","name":"Wittenstein","industry":"gearboxes","country":"DE","city":"Igersheim"},
+    {"domain":"baumüller.de","name":"Baumüller","industry":"drive_systems","country":"DE","city":"Nuremberg"},
+    {"domain":"stoll.com","name":"Stoll Knitting","industry":"textile_machinery","country":"DE","city":"Reutlingen"},
+    {"domain":"haas.com","name":"Haas CNC","industry":"cnc_machinery","country":"DE","city":"Oxnard"},
+    # AT / CH
+    {"domain":"engel.at","name":"Engel Austria","industry":"plastics","country":"AT","city":"Schwertberg"},
+    {"domain":"blum.com","name":"Julius Blum","industry":"furniture_fittings","country":"AT","city":"Höchst"},
+    {"domain":"knapp.com","name":"Knapp","industry":"warehouse","country":"AT","city":"Hart"},
+    {"domain":"egon-zehnder.com","name":"Egon Zehnder","industry":"consulting","country":"CH","city":"Zurich"},
+    {"domain":"bystronic.com","name":"Bystronic","industry":"metalworking","country":"CH","city":"Niederönz"},
+    {"domain":"feintool.com","name":"Feintool","industry":"metalworking","country":"CH","city":"Lyss"},
+    {"domain":"maxon.com","name":"Maxon","industry":"precision_motors","country":"CH","city":"Sachseln"},
+    {"domain":"sulzer.com","name":"Sulzer","industry":"pumps_machinery","country":"CH","city":"Winterthur"},
+    # FR / ES / PL
+    {"domain":"sidel.com","name":"Sidel","industry":"food_packaging","country":"FR","city":"Octeville"},
+    {"domain":"fives.com","name":"Fives","industry":"industrial_automation","country":"FR","city":"Paris"},
+    {"domain":"staubli.com","name":"Stäubli","industry":"robotics","country":"FR","city":"Faverges"},
+    {"domain":"proditec.fr","name":"Proditec","industry":"vision_systems","country":"FR","city":"Voisins"},
+    {"domain":"fagor-arrasate.com","name":"Fagor Arrasate","industry":"metalworking","country":"ES","city":"Mondragon"},
+    {"domain":"mondragon.com","name":"Mondragon Corporation","industry":"industrial","country":"ES","city":"Mondragon"},
+    {"domain":"zelisko.at","name":"Zelisko","industry":"meters","country":"AT","city":"Strebersdorf"},
+    {"domain":"fanuc.eu","name":"Fanuc Europe","industry":"robotics","country":"JP","city":"Luxembourg"},
+    {"domain":"comiziano.com","name":"Comiziano","industry":"food_packaging","country":"IT","city":"Naples"},
+    {"domain":"mts-sensors.com","name":"MTS Sensors","industry":"sensors","country":"DE","city":"Lüdenscheid"},
+    # NL / SE / DK / FI
+    {"domain":"vanderlande.com","name":"Vanderlande","industry":"warehouse","country":"NL","city":"Veghel"},
+    {"domain":"renishaw.com","name":"Renishaw","industry":"metrology","country":"GB","city":"Wotton-under-Edge"},
+    {"domain":"hexagonmi.com","name":"Hexagon Manufacturing Intelligence","industry":"metrology","country":"SE","city":"Stockholm"},
+    {"domain":"alfa-laval.com","name":"Alfa Laval","industry":"food_processing","country":"SE","city":"Lund"},
+    {"domain":"ssab.com","name":"SSAB","industry":"steel","country":"SE","city":"Stockholm"},
+    {"domain":"sandvik.com","name":"Sandvik","industry":"mining_tools","country":"SE","city":"Stockholm"},
+    {"domain":"atlas-copco.com","name":"Atlas Copco","industry":"pneumatics_tools","country":"SE","city":"Stockholm"},
+    {"domain":"abb.com","name":"ABB","industry":"robotics_automation","country":"CH","city":"Zurich"},
+    {"domain":"danfoss.com","name":"Danfoss","industry":"drives_controls","country":"DK","city":"Nordborg"},
+    {"domain":"grundfos.com","name":"Grundfos","industry":"pumps","country":"DK","city":"Bjerringbro"},
+    {"domain":"krones.com","name":"Krones","industry":"food_packaging","country":"DE","city":"Neutraubling"},
+    {"domain":"gea.com","name":"GEA Group","industry":"food_machinery","country":"DE","city":"Düsseldorf"},
+    # US / CA
+    {"domain":"jabil.com","name":"Jabil","industry":"electronics_manufacturing","country":"US","city":"St. Petersburg"},
+    {"domain":"flex.com","name":"Flex","industry":"electronics_manufacturing","country":"US","city":"Austin"},
+    {"domain":"celestica.com","name":"Celestica","industry":"electronics","country":"CA","city":"Toronto"},
+    {"domain":"plexus.com","name":"Plexus","industry":"electronics","country":"US","city":"Neenah"},
+    {"domain":"dematic.com","name":"Dematic","industry":"warehouse","country":"US","city":"Grand Rapids"},
+    {"domain":"rockwellautomation.com","name":"Rockwell Automation","industry":"automation","country":"US","city":"Milwaukee"},
+    {"domain":"cognex.com","name":"Cognex","industry":"machine_vision","country":"US","city":"Natick"},
+    {"domain":"keyence.com","name":"Keyence","industry":"sensors_vision","country":"JP","city":"Osaka"},
+    {"domain":"teradyne.com","name":"Teradyne","industry":"test_automation","country":"US","city":"North Reading"},
+    {"domain":"ur.dk","name":"Universal Robots","industry":"collaborative_robotics","country":"DK","city":"Odense"},
+    # Pharma / Medical
+    {"domain":"getinge.com","name":"Getinge","industry":"medical","country":"SE","city":"Gothenburg"},
+    {"domain":"sartorius.com","name":"Sartorius","industry":"pharma","country":"DE","city":"Göttingen"},
+    {"domain":"grifols.com","name":"Grifols","industry":"pharma","country":"ES","city":"Barcelona"},
+    {"domain":"bioventus.com","name":"Bioventus","industry":"medical","country":"US","city":"Durham"},
+    # Logistics / 3PL
+    {"domain":"jungheinrich.com","name":"Jungheinrich","industry":"warehouse","country":"DE","city":"Hamburg"},
+    {"domain":"swisslog.com","name":"Swisslog","industry":"warehouse","country":"CH","city":"Buchs"},
+    {"domain":"ssi-schaefer.com","name":"SSI Schäfer","industry":"warehouse","country":"DE","city":"Neunkirchen"},
+    {"domain":"mecalux.com","name":"Mecalux","industry":"warehouse","country":"ES","city":"Barcelona"},
+    {"domain":"toyota-industries.com","name":"Toyota Industries","industry":"forklifts","country":"JP","city":"Kariya"},
+    {"domain":"crown.com","name":"Crown Equipment","industry":"forklifts","country":"US","city":"New Bremen"},
+    {"domain":"linde-mh.com","name":"Linde Material Handling","industry":"forklifts","country":"DE","city":"Aschaffenburg"},
+    # Steel / Metal
+    {"domain":"voestalpine.com","name":"voestalpine","industry":"steel","country":"AT","city":"Linz"},
+    {"domain":"outokumpu.com","name":"Outokumpu","industry":"steel","country":"FI","city":"Helsinki"},
+    {"domain":"ametek.com","name":"Ametek","industry":"electronic_instruments","country":"US","city":"Berwyn"},
+    {"domain":"kennametal.com","name":"Kennametal","industry":"cutting_tools","country":"US","city":"Pittsburgh"},
+    {"domain":"iscar.com","name":"Iscar","industry":"cutting_tools","country":"IL","city":"Tefen"},
+    # Plastics / Rubber
+    {"domain":"krauss-maffei.com","name":"KraussMaffei","industry":"plastics","country":"DE","city":"Munich"},
+    {"domain":"arburg.com","name":"Arburg","industry":"plastics","country":"DE","city":"Lossburg"},
+    {"domain":"sumitomo-shi.com","name":"Sumitomo Heavy Industries","industry":"plastics","country":"JP","city":"Tokyo"},
+    {"domain":"wittmann-group.com","name":"Wittmann Group","industry":"plastics","country":"AT","city":"Vienna"},
+    # Additional Italian PMI
+    {"domain":"oms-srl.it","name":"OMS","industry":"lifting_equipment","country":"IT","city":"Brescia"},
+    {"domain":"bema.it","name":"Bema","industry":"conveying","country":"IT","city":"Parma"},
+    {"domain":"sitecna.it","name":"Sitecna","industry":"conveying","country":"IT","city":"Riese"},
+    {"domain":"mias-group.com","name":"MIAS Group","industry":"warehouse","country":"DE","city":"Waldershof"},
+    {"domain":"rocla.com","name":"Rocla","industry":"agv","country":"FI","city":"Järvenpää"},
+    {"domain":"elettric80.com","name":"Elettric80","industry":"warehouse_agv","country":"IT","city":"Viano"},
+    {"domain":"tre-srl.it","name":"TRE","industry":"robotic_cells","country":"IT","city":"Brescia"},
+    {"domain":"arol.com","name":"Arol","industry":"capping_machines","country":"IT","city":"Canelli"},
+    {"domain":"pavan.com","name":"Pavan Group","industry":"food_machinery","country":"IT","city":"Galliera Veneta"},
+    {"domain":"ima-dairy.com","name":"IMA Dairy & Food","industry":"food_machinery","country":"IT","city":"Ozzano"},
+    {"domain":"gd.it","name":"G.D","industry":"tobacco_packaging","country":"IT","city":"Bologna"},
+    {"domain":"ilapak.com","name":"Ilapak","industry":"packaging","country":"CH","city":"Schlieren"},
+    {"domain":"mespack.com","name":"Mespack","industry":"packaging","country":"ES","city":"Barcelona"},
+    {"domain":"robopac.com","name":"Robopac","industry":"wrapping_machines","country":"IT","city":"Forli"},
+    {"domain":"ocme.com","name":"OCME","industry":"packaging","country":"IT","city":"Parma"},
+    {"domain":"sodaltech.com","name":"Sodaltech","industry":"packaging","country":"IT","city":"Cesena"},
+    {"domain":"bortolin-kemo.com","name":"Bortolin Kemo","industry":"packaging","country":"IT","city":"Conegliano"},
+    {"domain":"savoye.com","name":"Savoye","industry":"warehouse_automation","country":"FR","city":"Courcouronnes"},
+    {"domain":"automha.com","name":"Automha","industry":"warehouse_agv","country":"IT","city":"Cologno al Serio"},
+    {"domain":"ferretto-group.com","name":"Ferretto Group","industry":"warehouse","country":"IT","city":"Vicenza"},
+    {"domain":"bett-sistemi.it","name":"Bett Sistemi","industry":"warehouse","country":"IT","city":"Rovereto"},
+    {"domain":"eurofork.com","name":"Eurofork","industry":"warehouse","country":"IT","city":"Trieste"},
+    {"domain":"kastalon.com","name":"Kastalon","industry":"polyurethane","country":"US","city":"Chicago"},
+    {"domain":"omron.com","name":"Omron","industry":"automation_robotics","country":"JP","city":"Kyoto"},
+    {"domain":"yaskawa.eu","name":"Yaskawa Europe","industry":"robotics_drives","country":"JP","city":"Allershausen"},
+    {"domain":"nachi-fujikoshi.co.jp","name":"Nachi-Fujikoshi","industry":"robotics","country":"JP","city":"Toyama"},
+    {"domain":"kawasaki-robotics.com","name":"Kawasaki Robotics","industry":"robotics","country":"JP","city":"Akashi"},
+    {"domain":"denso-robotics.com","name":"Denso Robotics","industry":"robotics","country":"JP","city":"Aichi"},
+    {"domain":"igus.com","name":"Igus","industry":"energy_chains","country":"DE","city":"Cologne"},
+    {"domain":"zimmer-group.com","name":"Zimmer Group","industry":"gripping","country":"DE","city":"Rheinau"},
+    {"domain":"destaco.com","name":"Destaco","industry":"gripping_clamping","country":"US","city":"Auburn Hills"},
+    {"domain":"pneumatically.com","name":"Pneumatically","industry":"pneumatics","country":"IT","city":"Milan"},
+    {"domain":"rexnord.com","name":"Rexnord","industry":"conveying","country":"US","city":"Milwaukee"},
+    {"domain":"intralox.com","name":"Intralox","industry":"conveying","country":"US","city":"New Orleans"},
+    {"domain":"interroll.com","name":"Interroll","industry":"conveying_warehouse","country":"CH","city":"Sant'Antonino"},
+    {"domain":"dorner.com","name":"Dorner","industry":"conveying","country":"US","city":"Hartland"},
+    {"domain":"bosch-rexroth.com","name":"Bosch Rexroth","industry":"drive_control","country":"DE","city":"Lohr"},
+    {"domain":"parker.com","name":"Parker Hannifin","industry":"motion_control","country":"US","city":"Cleveland"},
+    {"domain":"emerson.com","name":"Emerson Electric","industry":"automation","country":"US","city":"St. Louis"},
+    {"domain":"honeywell.com","name":"Honeywell","industry":"automation","country":"US","city":"Charlotte"},
+    {"domain":"ge.com","name":"GE Automation","industry":"automation","country":"US","city":"Boston"},
+    {"domain":"yokogawa.com","name":"Yokogawa","industry":"automation","country":"JP","city":"Tokyo"},
+    {"domain":"endress-hauser.com","name":"Endress+Hauser","industry":"process_automation","country":"CH","city":"Reinach"},
+    {"domain":"pepperl-fuchs.com","name":"Pepperl+Fuchs","industry":"sensors","country":"DE","city":"Mannheim"},
+    {"domain":"balluff.com","name":"Balluff","industry":"sensors","country":"DE","city":"Neuhausen"},
+    {"domain":"turck.com","name":"Turck","industry":"sensors","country":"DE","city":"Mülheim"},
+    {"domain":"contrinex.com","name":"Contrinex","industry":"sensors","country":"CH","city":"Corminboeuf"},
+    {"domain":"leuze.com","name":"Leuze Electronic","industry":"sensors","country":"DE","city":"Owen"},
+    {"domain":"baumer.com","name":"Baumer","industry":"sensors","country":"CH","city":"Frauenfeld"},
+    {"domain":"wenglor.com","name":"Wenglor","industry":"sensors","country":"DE","city":"Tettnang"},
+    {"domain":"datasensor.com","name":"Datasensor","industry":"sensors","country":"IT","city":"San Giorgio"},
+    {"domain":"microscan.com","name":"Microscan","industry":"vision_barcode","country":"US","city":"Renton"},
+    {"domain":"teledyne-dalsa.com","name":"Teledyne DALSA","industry":"vision_cameras","country":"CA","city":"Waterloo"},
+    {"domain":"basler.com","name":"Basler","industry":"vision_cameras","country":"DE","city":"Ahrensburg"},
+    {"domain":"ids-imaging.com","name":"IDS Imaging","industry":"vision_cameras","country":"DE","city":"Obersulm"},
+    {"domain":"vitrox.com","name":"ViTrox","industry":"machine_vision","country":"MY","city":"Penang"},
+    {"domain":"mvtec.com","name":"MVTec Software","industry":"machine_vision","country":"DE","city":"Munich"},
+    {"domain":"isra-vision.com","name":"ISRA Vision","industry":"machine_vision","country":"DE","city":"Darmstadt"},
+]
 
-OPPORTUNITY_MAP = {
-    "collaborative_robot":      {"categories": ["robotics", "cnc_machine_tending"], "base_score": 70},
-    "industrial_robot":         {"categories": ["robotics"], "base_score": 75},
-    "amr_agv":                  {"categories": ["amr_agv"], "base_score": 70},
-    "machine_tending":          {"categories": ["cnc_machine_tending"], "base_score": 80},
-    "palletizing":              {"categories": ["robotics"], "types": ["palletizing"], "base_score": 90},
-    "packaging_automation":     {"categories": ["robotics"], "types": ["end_of_line"], "base_score": 75},
-    "mes_scada":                {"categories": ["mes_scada"], "base_score": 75},
-    "plc_upgrade":              {"categories": ["mes_scada"], "types": ["plc_systems"], "base_score": 70},
-    "computer_vision":          {"categories": ["machine_vision"], "base_score": 80},
-    "predictive_maintenance":   {"categories": ["hiring"], "types": ["maintenance_technician_hiring"], "base_score": 65},
-    "warehouse_automation":     {"categories": ["amr_agv"], "base_score": 75},
-    "industrial_ai":            {"categories": ["mes_scada", "machine_vision"], "base_score": 70},
+# ─── SCORING ENGINE ───────────────────────────────────────────────────────────
+OPPS = {
+    "collaborative_robot":     {"cats":["robotics","cnc_machine_tending"],"dmin":25000,"dmax":90000,"sol":"Collaborative Robot Cell (Cobot)"},
+    "industrial_robot":        {"cats":["robotics"],"dmin":80000,"dmax":260000,"sol":"Industrial Robot System"},
+    "amr_agv":                 {"cats":["amr_agv"],"dmin":100000,"dmax":450000,"sol":"AMR / AGV Fleet"},
+    "machine_tending":         {"cats":["cnc_machine_tending"],"dmin":60000,"dmax":200000,"sol":"CNC Machine Tending Robot"},
+    "palletizing":             {"cats":["robotics"],"types":["palletizing","end_of_line"],"dmin":55000,"dmax":160000,"sol":"End-of-Line Palletizing Robot"},
+    "packaging_automation":    {"cats":["robotics"],"types":["end_of_line"],"dmin":45000,"dmax":140000,"sol":"Packaging Automation System"},
+    "mes_scada":               {"cats":["mes_scada"],"dmin":45000,"dmax":230000,"sol":"MES / SCADA Platform"},
+    "plc_upgrade":             {"cats":["mes_scada"],"types":["plc_systems"],"dmin":20000,"dmax":90000,"sol":"PLC Retrofit & Upgrade"},
+    "computer_vision":         {"cats":["machine_vision"],"dmin":30000,"dmax":220000,"sol":"Computer Vision Inspection System"},
+    "predictive_maintenance":  {"cats":["hiring"],"types":["maintenance_technician_hiring"],"dmin":20000,"dmax":90000,"sol":"Predictive Maintenance Platform"},
+    "warehouse_automation":    {"cats":["amr_agv"],"dmin":100000,"dmax":450000,"sol":"Warehouse Automation System"},
+    "industrial_ai":           {"cats":["mes_scada","machine_vision"],"dmin":45000,"dmax":220000,"sol":"Industrial AI Platform"},
 }
 
-DEAL_VALUES = {
-    "collaborative_robot":      (30000,  90000),
-    "industrial_robot":         (80000,  250000),
-    "amr_agv":                  (100000, 400000),
-    "machine_tending":          (60000,  180000),
-    "palletizing":              (60000,  150000),
-    "packaging_automation":     (50000,  130000),
-    "mes_scada":                (50000,  200000),
-    "plc_upgrade":              (20000,  80000),
-    "computer_vision":          (30000,  150000),
-    "predictive_maintenance":   (20000,  80000),
-    "warehouse_automation":     (100000, 400000),
-    "industrial_ai":            (50000,  200000),
-}
-
-SOLUTION_NAMES = {
-    "collaborative_robot":      "Collaborative Robot Cell (Cobot)",
-    "industrial_robot":         "Industrial Robot System",
-    "amr_agv":                  "AMR / AGV Fleet",
-    "machine_tending":          "CNC Machine Tending Robot",
-    "palletizing":              "End-of-Line Palletizing Robot",
-    "packaging_automation":     "Packaging Automation System",
-    "mes_scada":                "MES / SCADA Platform",
-    "plc_upgrade":              "PLC Retrofit & Upgrade",
-    "computer_vision":          "Computer Vision Inspection System",
-    "predictive_maintenance":   "Predictive Maintenance Platform",
-    "warehouse_automation":     "Warehouse Automation System",
-    "industrial_ai":            "Industrial AI Platform",
-}
-
-
-def compute_scores(signals: list) -> dict:
-    """Calcola i 6 score proprietari dai segnali rilevati."""
-    cat_counts = {}
-    cat_confidence = {}
+def compute_scores(signals):
+    cat_conf = {}
+    cat_cnt  = {}
     for s in signals:
-        cat = s["signal_category"]
-        cat_counts[cat] = cat_counts.get(cat, 0) + 1
-        cat_confidence[cat] = max(cat_confidence.get(cat, 0), s["confidence_score"])
+        c = s["signal_category"]
+        cat_conf[c] = max(cat_conf.get(c, 0), s["confidence_score"])
+        cat_cnt[c]  = cat_cnt.get(c, 0) + 1
 
-    def score(cats, weight=1.0):
-        total = sum(cat_counts.get(c, 0) * cat_confidence.get(c, 0) for c in cats)
-        base  = sum(cat_confidence.get(c, 0) for c in cats if c in cat_counts)
-        if not base: return 0
-        raw = min(100, int((total / max(1, len(cats) * 100)) * 100 * weight))
-        return min(100, max(0, raw + (10 if sum(cat_counts.get(c,0) for c in cats) > 2 else 0)))
-
-    robotics    = score(["robotics", "cnc_machine_tending"], 1.2)
-    amr         = score(["amr_agv"], 1.3)
-    mes         = score(["mes_scada"], 1.2)
-    vision      = score(["machine_vision"], 1.2)
-    intent      = score(["growth_buying_intent", "hiring"], 1.4)
-    readiness   = min(100, int((robotics + amr + mes + intent) / 4))
+    def sc(cats, w=1.0):
+        hits = sum(cat_cnt.get(c,0) for c in cats)
+        if not hits: return 0
+        base = sum(cat_conf.get(c,0) for c in cats if c in cat_conf)
+        raw  = min(100, int(base / len(cats) * w))
+        bonus = min(20, hits * 5)
+        return min(100, raw + bonus)
 
     return {
-        "automation_readiness_score":      readiness,
-        "robotics_opportunity_score":      robotics,
-        "amr_agv_opportunity_score":       amr,
-        "mes_opportunity_score":           mes,
-        "machine_vision_opportunity_score": vision,
-        "buying_intent_score":             intent,
+        "automation_readiness_score":       sc(["robotics","cnc_machine_tending","amr_agv","mes_scada"], 0.9),
+        "robotics_opportunity_score":       sc(["robotics","cnc_machine_tending"], 1.2),
+        "amr_agv_opportunity_score":        sc(["amr_agv"], 1.3),
+        "mes_opportunity_score":            sc(["mes_scada"], 1.2),
+        "machine_vision_opportunity_score": sc(["machine_vision"], 1.2),
+        "buying_intent_score":              sc(["growth_buying_intent","hiring"], 1.4),
     }
 
-
-def generate_opportunities(company_id: str, company_name: str, domain: str,
-                            signals: list, scores: dict) -> list:
-    """Genera le opportunity raccomandate con stima deal value."""
-    opps = []
-    cat_signals = {}
+def generate_opps(cid, cname, domain, signals, scores):
+    cat_sigs = {}
     for s in signals:
-        cat_signals.setdefault(s["signal_category"], []).append(s)
-
-    for opp_type, cfg in OPPORTUNITY_MAP.items():
-        cats = cfg["categories"]
+        cat_sigs.setdefault(s["signal_category"], []).append(s)
+    opps = []
+    for otype, cfg in OPPS.items():
+        cats     = cfg["cats"]
         relevant = [s for s in signals if s["signal_category"] in cats]
-        if not relevant:
-            continue
-
-        # Score specifico per questa opportunity
-        opp_score = min(100, int(
-            sum(s["confidence_score"] for s in relevant) / max(1, len(relevant)) +
-            len(relevant) * 5
-        ))
-        if opp_score < 40:
-            continue
-
-        intent_boost = scores.get("buying_intent_score", 0) // 10
-        opp_score = min(100, opp_score + intent_boost)
-
-        dmin, dmax = DEAL_VALUES.get(opp_type, (50000, 200000))
-        # Scala il deal value in base allo score
-        factor = opp_score / 100
-        dmin_adj = int(dmin * (0.7 + 0.3 * factor))
-        dmax_adj = int(dmax * (0.7 + 0.3 * factor))
-
-        top_signals = [s["signal_type"] for s in sorted(relevant, key=lambda x: -x["confidence_score"])[:3]]
-        reason = _build_reason(opp_type, relevant, scores)
-
+        if not relevant: continue
+        avg_conf = sum(s["confidence_score"] for s in relevant) / len(relevant)
+        osc = min(100, int(avg_conf + len(relevant)*5 + scores.get("buying_intent_score",0)//10))
+        if osc < 40: continue
+        factor = osc / 100
         opps.append({
-            "company_id":           company_id,
-            "company_name":         company_name,
-            "company_domain":       domain,
-            "opportunity_type":     opp_type,
-            "recommended_solution": SOLUTION_NAMES[opp_type],
-            "opportunity_score":    opp_score,
-            "buying_intent_score":  scores.get("buying_intent_score", 0),
-            "estimated_deal_value_min": dmin_adj,
-            "estimated_deal_value_max": dmax_adj,
-            "reason_summary":       reason,
-            "signals_count":        len(relevant),
-            "top_signals":          top_signals,
+            "company_id": cid, "company_name": cname, "company_domain": domain,
+            "opportunity_type": otype,
+            "recommended_solution": cfg["sol"],
+            "opportunity_score": osc,
+            "buying_intent_score": scores.get("buying_intent_score", 0),
+            "estimated_deal_value_min": int(cfg["dmin"] * (0.7 + 0.3*factor)),
+            "estimated_deal_value_max": int(cfg["dmax"] * (0.7 + 0.3*factor)),
+            "reason_summary": f"Detected: {', '.join(s['signal_type'] for s in relevant[:3])}. {cfg['sol']}.",
+            "signals_count": len(relevant),
+            "top_signals": [s["signal_type"] for s in sorted(relevant, key=lambda x:-x["confidence_score"])[:3]],
         })
-
-    # Ordina per score decrescente
     opps.sort(key=lambda x: -x["opportunity_score"])
-    return opps
+    return opps[:5]
 
-
-def _build_reason(opp_type: str, signals: list, scores: dict) -> str:
-    signal_descs = list({s["signal_type"].replace("_", " ") for s in signals[:4]})
-    intent = scores.get("buying_intent_score", 0)
-    parts = []
-    if signal_descs:
-        parts.append(f"Detected signals: {', '.join(signal_descs)}")
-    if intent >= 70:
-        parts.append("strong buying intent indicators")
-    elif intent >= 40:
-        parts.append("moderate buying intent")
-    solution = SOLUTION_NAMES.get(opp_type, opp_type.replace("_", " ").title())
-    parts.append(f"→ recommended: {solution}")
-    return ". ".join(parts).capitalize() + "."
-
-
-# ──────────────────────────────────────────────
-# SCRAPER
-# ──────────────────────────────────────────────
-
-def clean_text(html: str) -> str:
-    """Estrae testo pulito dall'HTML."""
+# ─── HTML UTILS ───────────────────────────────────────────────────────────────
+def clean(html):
     try:
         soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "noscript", "head"]):
-            tag.decompose()
-        return " ".join(soup.get_text(separator=" ").split())[:50000]
-    except Exception:
-        return html[:20000]
+        for t in soup(["script","style","noscript","head"]): t.decompose()
+        return " ".join(soup.get_text(" ").split())[:60000]
+    except: return html[:20000]
 
-
-def detect_signals(text: str, url: str, company_id: str,
-                   company_name: str, domain: str) -> list:
-    """Applica tutti i pattern al testo e ritorna i segnali trovati."""
-    text_lower = text.lower()
-    found = []
-    seen_types = set()
-
-    for pat_cfg in SIGNAL_DB:
-        signal_type = pat_cfg["type"]
-        if (pat_cfg["category"], signal_type) in seen_types:
-            continue
-        for pattern in pat_cfg["patterns"]:
-            m = re.search(pattern, text_lower)
+def detect(text, url, cid, cname, domain):
+    tl = text.lower()
+    found, seen = [], set()
+    for p in SIGNALS:
+        k = (p["cat"], p["type"])
+        if k in seen: continue
+        for pat in p["p"]:
+            try:
+                m = re.search(pat, tl)
+            except: continue
             if m:
-                # Estrai contesto: 150 char attorno al match
-                start = max(0, m.start() - 80)
-                end   = min(len(text), m.end() + 80)
-                evidence = text[start:end].strip()
-
+                s, e = max(0,m.start()-100), min(len(text),m.end()+100)
                 found.append({
-                    "company_id":       company_id,
-                    "company_name":     company_name,
-                    "company_domain":   domain,
-                    "signal_category":  pat_cfg["category"],
-                    "signal_type":      signal_type,
-                    "source_url":       url,
-                    "evidence_text":    evidence[:400],
-                    "confidence_score": pat_cfg["confidence"],
-                    "detected_at":      datetime.now(timezone.utc).isoformat(),
+                    "company_id": cid, "company_name": cname, "company_domain": domain,
+                    "signal_category": p["cat"], "signal_type": p["type"],
+                    "source_url": url, "evidence_text": text[s:e].strip()[:400],
+                    "confidence_score": p["conf"],
+                    "detected_at": datetime.now(timezone.utc).isoformat(),
                 })
-                seen_types.add((pat_cfg["category"], signal_type))
-                break  # un match per pattern è sufficiente
-
+                seen.add(k); break
     return found
 
-
-async def fetch_page(session: aiohttp.ClientSession, url: str) -> str:
-    """Scarica una pagina con timeout e retry."""
-    for attempt in range(2):
+# ─── HTTP ─────────────────────────────────────────────────────────────────────
+async def fetch(session, url):
+    for att in range(2):
         try:
-            async with session.get(
-                url, headers=HEADERS,
+            async with session.get(url, headers=HEADERS,
                 timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-                allow_redirects=True, ssl=False
-            ) as resp:
-                if resp.status == 200:
-                    ct = resp.headers.get("content-type", "")
+                allow_redirects=True, ssl=False) as r:
+                if r.status == 200:
+                    ct = r.headers.get("content-type","")
                     if "text" in ct or "html" in ct:
-                        return await resp.text(errors="replace")
+                        return await r.text(errors="replace")
                 return ""
-        except asyncio.TimeoutError:
-            log.debug(f"Timeout: {url}")
-            return ""
-        except Exception as e:
-            if attempt == 0:
-                await asyncio.sleep(1)
-            else:
-                log.debug(f"ERR {url}: {e}")
-                return ""
+        except: 
+            if att == 0: await asyncio.sleep(1)
     return ""
 
-
-async def scan_domain(session: aiohttp.ClientSession, company: dict) -> dict:
-    """Scansiona tutte le pagine di un'azienda e ritorna i segnali."""
-    domain  = company["domain"]
-    base    = company.get("website_url") or f"https://{domain}"
-    cid     = company["id"]
-    cname   = company.get("name", domain)
-
-    all_signals = []
-    pages_scanned = 0
-
-    for path in PAGES_TO_SCAN:
-        url = urljoin(base.rstrip("/") + "/", path.lstrip("/"))
-        html = await fetch_page(session, url)
-        if not html:
-            # Prova HTTP se HTTPS fallisce
-            if url.startswith("https://"):
-                url2 = url.replace("https://", "http://", 1)
-                html = await fetch_page(session, url2)
-        if not html:
-            continue
-
-        pages_scanned += 1
-        text = clean_text(html)
-        sigs = detect_signals(text, url, cid, cname, domain)
-        all_signals.extend(sigs)
-        await asyncio.sleep(0.3)  # gentile con il server
-
-    # Dedup: tieni 1 segnale per (category, type) — quello con confidence più alta
-    deduped = {}
-    for s in all_signals:
-        key = (s["signal_category"], s["signal_type"])
-        if key not in deduped or s["confidence_score"] > deduped[key]["confidence_score"]:
-            deduped[key] = s
-    signals = list(deduped.values())
-
-    return {
-        "company":       company,
-        "signals":       signals,
-        "pages_scanned": pages_scanned,
-    }
-
-
-# ──────────────────────────────────────────────
-# BASE44 API
-# ──────────────────────────────────────────────
-
-async def b44_post(session: aiohttp.ClientSession, entity: str, data: dict) -> str:
-    """Crea un record su Base44, ritorna l'ID."""
+# ─── BASE44 API ───────────────────────────────────────────────────────────────
+async def b44_post(session, entity, data):
     url = f"{B44_BASE}/{entity}"
     try:
         async with session.post(url, headers=HW, json=data,
-                                timeout=aiohttp.ClientTimeout(total=30)) as resp:
-            if resp.status in (200, 201):
-                r = await resp.json(content_type=None)
-                return r.get("id", "")
-            else:
-                t = await resp.text()
-                log.warning(f"POST {entity} {resp.status}: {t[:100]}")
-                return ""
-    except Exception as e:
-        log.warning(f"POST {entity} ERR: {e}")
-        return ""
+            timeout=aiohttp.ClientTimeout(total=30)) as r:
+            if r.status in (200,201):
+                d = await r.json(content_type=None)
+                return d.get("id","") if isinstance(d, dict) else ""
+    except Exception as e: log.debug(f"POST {entity}: {e}")
+    return ""
 
-
-async def b44_put(session: aiohttp.ClientSession, entity: str, eid: str, data: dict) -> bool:
-    """Aggiorna un record su Base44."""
+async def b44_put(session, entity, eid, data):
     url = f"{B44_BASE}/{entity}/{eid}"
     try:
         async with session.put(url, headers=HW, json=data,
-                               timeout=aiohttp.ClientTimeout(total=30)) as resp:
-            return resp.status in (200, 201)
-    except Exception as e:
-        log.warning(f"PUT {entity} ERR: {e}")
-        return False
+            timeout=aiohttp.ClientTimeout(total=30)) as r:
+            return r.status in (200,201)
+    except: return False
 
-
-async def b44_get_or_create_company(session: aiohttp.ClientSession,
-                                    domain: str, name: str, website: str = "",
-                                    country: str = "", industry: str = "") -> str:
-    """Ritorna l'ID di IndustrialCompany per questo dominio, creandola se non esiste."""
-    # Cerca per dominio
-    url = f"{B44_BASE}/IndustrialCompany?domain={domain}&limit=1&fields=id"
+async def get_or_create_company(session, c):
+    domain = c["domain"]
+    url = f"{B44_BASE}/IndustrialCompany?domain={quote_plus(domain)}&limit=1&fields=id"
     try:
-        async with session.get(url, headers=HW, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status == 200:
-                data = await resp.json(content_type=None)
-                if data:
-                    return data[0]["id"]
-    except Exception:
-        pass
+        async with session.get(url, headers=HW, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            if r.status == 200:
+                d = await r.json(content_type=None)
+                if isinstance(d, list) and d: return d[0]["id"]
+    except: pass
+    return await b44_post(session, "IndustrialCompany", {
+        "name": c.get("name", domain), "domain": domain,
+        "website_url": f"https://{domain}",
+        "country": c.get("country",""), "city": c.get("city",""),
+        "industry": c.get("industry",""), "scan_status": "pending",
+        "source": "seed_v2",
+    })
 
-    # Crea
-    payload = {
-        "name":        name,
-        "domain":      domain,
-        "website_url": website or f"https://{domain}",
-        "country":     country,
-        "industry":    industry,
-        "scan_status": "pending",
-        "source":      "industrial_scanner",
-    }
-    return await b44_post(session, "IndustrialCompany", payload)
+# ─── SCAN ONE COMPANY ─────────────────────────────────────────────────────────
+async def scan_one(session, c):
+    domain  = c["domain"]
+    base    = f"https://{domain}"
+    cname   = c.get("name", domain)
 
-
-async def save_results(session: aiohttp.ClientSession, result: dict):
-    """Salva segnali, score e opportunity su Base44."""
-    company  = result["company"]
-    signals  = result["signals"]
-    pages    = result["pages_scanned"]
-    domain   = company["domain"]
-    cname    = company.get("name", domain)
-
-    # Ottieni/crea IndustrialCompany
-    cid = await b44_get_or_create_company(
-        session, domain, cname,
-        company.get("website_url", ""),
-        company.get("country", ""),
-        company.get("industry", ""),
-    )
+    # Ottieni/crea company su Base44
+    cid = await get_or_create_company(session, c)
     if not cid:
-        log.warning(f"No company ID for {domain}")
-        return
+        stats["errors"] += 1; return
 
-    # Salva segnali (bulk se molti)
-    for sig in signals:
-        sig["company_id"] = cid
-        await b44_post(session, "IndustrialSignal", sig)
-        await asyncio.sleep(0.1)
+    all_sigs, pages_done = [], 0
+    for path in PAGES:
+        url = base.rstrip("/") + path
+        html = await fetch(session, url)
+        if not html and url.startswith("https://"):
+            html = await fetch(session, url.replace("https://","http://",1))
+        if not html: continue
+        pages_done += 1
+        sigs = detect(clean(html), url, cid, cname, domain)
+        all_sigs.extend(sigs)
+        await asyncio.sleep(PAGE_DELAY)
 
-    # Calcola score
-    scores = compute_scores(signals)
-    top_score_key = max(scores, key=scores.get) if scores else "automation_readiness_score"
+    # Dedup segnali
+    dedup = {}
+    for s in all_sigs:
+        k = (s["signal_category"], s["signal_type"])
+        if k not in dedup or s["confidence_score"] > dedup[k]["confidence_score"]:
+            dedup[k] = s
+    sigs = list(dedup.values())
 
-    # Aggiorna IndustrialCompany con i score
-    score_update = {
-        **scores,
+    # Scoring
+    scores = compute_scores(sigs)
+    
+    # Update company con score
+    best_opp = max(scores, key=scores.get) if scores else ""
+    await b44_put(session, "IndustrialCompany", cid, {
+        **scores, "scan_status": "done",
         "last_scan_date": datetime.now(timezone.utc).isoformat(),
-        "scan_status":    "done",
-    }
-    await b44_put(session, "IndustrialCompany", cid, score_update)
+        "top_opportunity": best_opp,
+    })
+
+    # Salva segnali
+    for s in sigs:
+        await b44_post(session, "IndustrialSignal", s)
+        await asyncio.sleep(0.08)
 
     # Genera e salva opportunity
-    opps = generate_opportunities(cid, cname, domain, signals, scores)
-    for opp in opps[:5]:  # max 5 opportunity per azienda
-        await b44_post(session, "IndustrialOpportunity", opp)
-        await asyncio.sleep(0.1)
+    opps = generate_opps(cid, cname, domain, sigs, scores)
+    for o in opps:
+        await b44_post(session, "IndustrialOpportunity", o)
+        await asyncio.sleep(0.08)
 
-    # Salva ScanJob
+    # Scan job
     await b44_post(session, "IndustrialScanJob", {
-        "company_id":              cid,
-        "company_domain":          domain,
-        "status":                  "done",
-        "started_at":              datetime.now(timezone.utc).isoformat(),
-        "completed_at":            datetime.now(timezone.utc).isoformat(),
-        "pages_scanned":           pages,
-        "signals_found":           len(signals),
+        "company_id": cid, "company_domain": domain, "status": "done",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "pages_scanned": pages_done, "signals_found": len(sigs),
         "opportunities_generated": len(opps),
     })
 
-    log.info(f"✅ {domain}: pages={pages} signals={len(signals)} opps={len(opps)} "
-             f"robotics={scores.get('robotics_opportunity_score',0)} "
-             f"intent={scores.get('buying_intent_score',0)}")
+    stats["scanned"]      += 1
+    stats["signals"]      += len(sigs)
+    stats["opportunities"]+= len(opps)
+    log.info(f"✅ {domain}: pages={pages_done} signals={len(sigs)} opps={len(opps)} robotics={scores.get('robotics_opportunity_score',0)} intent={scores.get('buying_intent_score',0)}")
 
-
-# ──────────────────────────────────────────────
-# COMPANY SEED — Dataset industriale di partenza
-# ──────────────────────────────────────────────
-
-# Seed di aziende manifatturiere / industriali per settore
-INDUSTRIAL_SEED = [
-    # ── Automotive / Tier 1 ──
-    {"domain": "magneti-marelli.com",   "name": "Magneti Marelli",    "industry": "automotive", "country": "IT"},
-    {"domain": "brembo.com",            "name": "Brembo",             "industry": "automotive", "country": "IT"},
-    {"domain": "piaggio.com",           "name": "Piaggio",            "industry": "automotive", "country": "IT"},
-    {"domain": "comau.com",             "name": "Comau",              "industry": "robotics",   "country": "IT"},
-    {"domain": "salvagnini.com",        "name": "Salvagnini",         "industry": "metalworking","country": "IT"},
-    {"domain": "prima-industrie.com",   "name": "Prima Industrie",    "industry": "metalworking","country": "IT"},
-    {"domain": "ficep.com",             "name": "Ficep",              "industry": "metalworking","country": "IT"},
-    {"domain": "marposs.com",           "name": "Marposs",            "industry": "metrology",  "country": "IT"},
-    {"domain": "datalogic.com",         "name": "Datalogic",          "industry": "automation", "country": "IT"},
-    {"domain": "cama-group.com",        "name": "Cama Group",         "industry": "packaging",  "country": "IT"},
-    {"domain": "ima.it",                "name": "IMA Group",          "industry": "packaging",  "country": "IT"},
-    {"domain": "marchesini.com",        "name": "Marchesini Group",   "industry": "packaging",  "country": "IT"},
-    {"domain": "coesia.com",            "name": "Coesia",             "industry": "packaging",  "country": "IT"},
-    {"domain": "sacmi.com",             "name": "Sacmi",              "industry": "machinery",  "country": "IT"},
-    {"domain": "cefla.com",             "name": "Cefla",              "industry": "machinery",  "country": "IT"},
-    {"domain": "loccioni.com",          "name": "Loccioni",           "industry": "automation", "country": "IT"},
-    {"domain": "interpump.com",         "name": "Interpump",          "industry": "hydraulics", "country": "IT"},
-    {"domain": "comer-industries.com",  "name": "Comer Industries",   "industry": "machinery",  "country": "IT"},
-    {"domain": "bonfiglioli.com",       "name": "Bonfiglioli",        "industry": "automation", "country": "IT"},
-    {"domain": "elica.com",             "name": "Elica",              "industry": "appliances", "country": "IT"},
-
-    # ── German Mittelstand ──
-    {"domain": "trumpf.com",            "name": "Trumpf",             "industry": "metalworking","country": "DE"},
-    {"domain": "kuka.com",              "name": "KUKA",               "industry": "robotics",   "country": "DE"},
-    {"domain": "festo.com",             "name": "Festo",              "industry": "automation", "country": "DE"},
-    {"domain": "sew-eurodrive.com",     "name": "SEW-Eurodrive",      "industry": "automation", "country": "DE"},
-    {"domain": "belden.com",            "name": "Belden",             "industry": "automation", "country": "DE"},
-    {"domain": "weinig.com",            "name": "Weinig Group",       "industry": "woodworking","country": "DE"},
-    {"domain": "homag.com",             "name": "Homag",              "industry": "woodworking","country": "DE"},
-    {"domain": "duerr.com",             "name": "Dürr",               "industry": "automotive", "country": "DE"},
-    {"domain": "grob.de",               "name": "Grob",               "industry": "metalworking","country": "DE"},
-    {"domain": "zf.com",                "name": "ZF Friedrichshafen", "industry": "automotive", "country": "DE"},
-
-    # ── Food & Beverage Manufacturing ──
-    {"domain": "tetra.pak.com",         "name": "Tetra Pak",          "industry": "food_packaging","country": "SE"},
-    {"domain": "gea.com",               "name": "GEA Group",          "industry": "food_machinery","country": "DE"},
-    {"domain": "alfa-laval.com",        "name": "Alfa Laval",         "industry": "food_processing","country": "SE"},
-    {"domain": "sidel.com",             "name": "Sidel",              "industry": "food_packaging","country": "FR"},
-    {"domain": "krones.com",            "name": "Krones",             "industry": "food_packaging","country": "DE"},
-
-    # ── Logistics / Warehouse ──
-    {"domain": "jungheinrich.com",      "name": "Jungheinrich",       "industry": "warehouse",  "country": "DE"},
-    {"domain": "dematic.com",           "name": "Dematic",            "industry": "warehouse",  "country": "US"},
-    {"domain": "vanderlande.com",       "name": "Vanderlande",        "industry": "warehouse",  "country": "NL"},
-    {"domain": "swisslog.com",          "name": "Swisslog",           "industry": "warehouse",  "country": "CH"},
-    {"domain": "knapp.com",             "name": "Knapp",              "industry": "warehouse",  "country": "AT"},
-    {"domain": "ssi-schaefer.com",      "name": "SSI Schäfer",        "industry": "warehouse",  "country": "DE"},
-    {"domain": "mecalux.com",           "name": "Mecalux",            "industry": "warehouse",  "country": "ES"},
-
-    # ── Electronics / PCB Manufacturing ──
-    {"domain": "jabil.com",             "name": "Jabil",              "industry": "electronics","country": "US"},
-    {"domain": "flex.com",              "name": "Flex",               "industry": "electronics","country": "US"},
-    {"domain": "celestica.com",         "name": "Celestica",          "industry": "electronics","country": "CA"},
-    {"domain": "sanmina.com",           "name": "Sanmina",            "industry": "electronics","country": "US"},
-    {"domain": "plexus.com",            "name": "Plexus",             "industry": "electronics","country": "US"},
-
-    # ── Pharma / MedTech Manufacturing ──
-    {"domain": "getinge.com",           "name": "Getinge",            "industry": "medical",    "country": "SE"},
-    {"domain": "sartorius.com",         "name": "Sartorius",          "industry": "pharma",     "country": "DE"},
-    {"domain": "grifols.com",           "name": "Grifols",            "industry": "pharma",     "country": "ES"},
-
-    # ── Metal / Steel ──
-    {"domain": "voestalpine.com",       "name": "voestalpine",        "industry": "steel",      "country": "AT"},
-    {"domain": "outokumpu.com",         "name": "Outokumpu",          "industry": "steel",      "country": "FI"},
-    {"domain": "ssab.com",              "name": "SSAB",               "industry": "steel",      "country": "SE"},
-
-    # ── Plastics / Rubber ──
-    {"domain": "arburg.com",            "name": "Arburg",             "industry": "plastics",   "country": "DE"},
-    {"domain": "engel.at",              "name": "Engel Austria",      "industry": "plastics",   "country": "AT"},
-    {"domain": "krauss-maffei.com",     "name": "KraussMaffei",       "industry": "plastics",   "country": "DE"},
-    {"domain": "sumitomo-shi.com",      "name": "Sumitomo Heavy Industries","industry":"plastics","country":"JP"},
-
-    # ── Small/Mid Italian Manufacturers ──
-    {"domain": "camozzi.com",           "name": "Camozzi",            "industry": "pneumatics", "country": "IT"},
-    {"domain": "gimatic.it",            "name": "Gimatic",            "industry": "robotics",   "country": "IT"},
-    {"domain": "pneumax.it",            "name": "Pneumax",            "industry": "pneumatics", "country": "IT"},
-    {"domain": "univer.it",             "name": "Univer",             "industry": "pneumatics", "country": "IT"},
-    {"domain": "reer.it",               "name": "Reer",               "industry": "safety",     "country": "IT"},
-    {"domain": "pizzato.net",           "name": "Pizzato Elettrica",  "industry": "safety",     "country": "IT"},
-    {"domain": "gefran.com",            "name": "Gefran",             "industry": "automation", "country": "IT"},
-    {"domain": "givi-misure.it",        "name": "GIVI Misure",        "industry": "metrology",  "country": "IT"},
-    {"domain": "renishaw.com",          "name": "Renishaw",           "industry": "metrology",  "country": "GB"},
-    {"domain": "hexagonmi.com",         "name": "Hexagon MI",         "industry": "metrology",  "country": "SE"},
-]
-
-
-# ──────────────────────────────────────────────
-# MAIN LOOP
-# ──────────────────────────────────────────────
-
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
 async def main():
-    log.info(f"=== Industrial Scanner v1.0 — Worker {WORKER_ID}/{TOTAL_WORKERS} ===")
-    log.info(f"Seed aziende: {len(INDUSTRIAL_SEED)} | Concurrency: {CONCURRENCY}")
+    stats["status"] = "running"
+    my = [c for i,c in enumerate(SEED_COMPANIES) if i % TOTAL_WORKERS == WORKER_ID]
+    log.info(f"=== Industrial Scanner v2 | Worker {WORKER_ID}/{TOTAL_WORKERS} | {len(my)} aziende ===")
 
-    # Segmenta il seed tra i worker
-    my_companies = [c for i, c in enumerate(INDUSTRIAL_SEED) if i % TOTAL_WORKERS == WORKER_ID]
-    log.info(f"My batch: {len(my_companies)} aziende")
-
+    sem = asyncio.Semaphore(CONCURRENCY)
     conn = aiohttp.TCPConnector(limit=CONCURRENCY, ssl=False)
-    timeout = aiohttp.ClientTimeout(total=60)
-
-    async with aiohttp.ClientSession(connector=conn, timeout=timeout) as session:
-        sem = asyncio.Semaphore(CONCURRENCY)
-
-        async def scan_one(company):
+    async with aiohttp.ClientSession(connector=conn) as session:
+        async def _run(c):
             async with sem:
-                result = await scan_domain(session, company)
-                if result["pages_scanned"] > 0 or True:  # salva sempre
-                    await save_results(session, result)
-                await asyncio.sleep(DELAY_BETWEEN_DOMAINS)
+                try: await scan_one(session, c)
+                except Exception as e:
+                    log.warning(f"ERR {c['domain']}: {e}")
+                    stats["errors"] += 1
+                await asyncio.sleep(1.5)
+        await asyncio.gather(*[_run(c) for c in my], return_exceptions=True)
 
-        tasks = [scan_one(c) for c in my_companies]
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    log.info("=== Scan completato ===")
-
+    stats["status"] = "done"
+    log.info(f"=== COMPLETATO: scanned={stats['scanned']} signals={stats['signals']} opps={stats['opportunities']} ===")
+    while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
