@@ -1,9 +1,8 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip install aiohttp beautifulsoup4 lxml"
 
 [deploy]
-startCommand = "MAX_SUBPAGES=10 CONCURRENCY=8 python mass_scanner_runner.py"
+startCommand = "bash run.sh"
 healthcheckPath = "/"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
