@@ -557,6 +557,68 @@ async def b44_put(session, entity, eid, data):
     except Exception:
         return False
 
+async def fetch_revenue(session, domain, name=""):
+    """Fetch fatturato da Schema.org JSON-LD + Apollo (se disponibile)."""
+    result = {"revenue_range": "", "employee_count": None, "description": ""}
+
+    # --- Apollo.io (priorità massima) ---
+    apollo_key = os.environ.get("APOLLO_KEY", "")
+    if apollo_key:
+        try:
+            async with session.get(
+                "https://api.apollo.io/api/v1/organizations/enrich",
+                params={"domain": domain},
+                headers={"x-api-key": apollo_key, "accept": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json(content_type=None)
+                    org = d.get("organization") or {}
+                    if org:
+                        rev = org.get("annual_revenue_printed") or ""
+                        emp = org.get("estimated_num_employees") or org.get("num_employees")
+                        desc = (org.get("short_description") or org.get("seo_description",""))[:500]
+                        if rev or emp:
+                            result["revenue_range"]  = rev[:80] if rev else ""
+                            result["employee_count"] = int(emp) if emp else None
+                            result["description"]    = desc
+                            return result
+        except Exception:
+            pass
+
+    # --- Schema.org JSON-LD dalla homepage ---
+    try:
+        async with session.get(f"https://{domain}",
+                               timeout=aiohttp.ClientTimeout(total=8),
+                               headers={"User-Agent": "Mozilla/5.0 (compatible; IndustrialBot/1.0)"}) as r:
+            if r.status == 200:
+                html = await r.text(errors="replace")
+                scripts = re.findall(
+                    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+                    html, re.S | re.I)
+                for raw in scripts:
+                    try:
+                        item = json.loads(raw.strip())
+                        if isinstance(item, list): item = item[0] if item else {}
+                        t = item.get("@type", "")
+                        if isinstance(t, list): t = t[0] if t else ""
+                        if t in ("Organization","LocalBusiness","Corporation","Company","NGO"):
+                            emp_node = item.get("numberOfEmployees")
+                            emp = None
+                            if isinstance(emp_node, dict): emp = emp_node.get("value")
+                            elif isinstance(emp_node, (int,float)): emp = int(emp_node)
+                            desc = item.get("description","")[:500]
+                            if emp or desc:
+                                result["employee_count"] = emp
+                                result["description"]    = desc
+                                break
+                    except: pass
+    except Exception:
+        pass
+
+    return result
+
+
 
 async def get_or_create_company(session, c):
     domain = c["domain"]
@@ -730,15 +792,31 @@ async def scan_company(session, c):
         deal_max = opps[0]["estimated_deal_value_max"] if opps else 0
         best_opp_type = opps[0]["opportunity_type"] if opps else best_opp
 
+        # Fetch revenue + employees (Apollo > Schema.org)
+        revenue_data = await fetch_revenue(session, domain, cname)
+
         # Enrich description da LLM se disponibile
         company_update = {**scores, "scan_status": "done",
                           "last_scan_date": datetime.now(timezone.utc).isoformat(),
                           "top_opportunity": best_opp_type,
                           "estimated_deal_value_min": deal_min,
                           "estimated_deal_value_max": deal_max}
+
+        # Revenue & employees (non sovrascrivere se già presenti)
+        if revenue_data.get("revenue_range") and not c.get("revenue_range"):
+            company_update["revenue_range"] = revenue_data["revenue_range"]
+        if revenue_data.get("employee_count") and not c.get("employee_count"):
+            emp = int(revenue_data["employee_count"])
+            company_update["employee_count"] = emp
+            sz = ("micro" if emp < 10 else "small" if emp < 50 else
+                  "medium" if emp < 250 else "large" if emp < 1000 else "enterprise")
+            company_update["company_size"] = sz
+
         if llm_result.get("company_summary"):
             company_update["description"] = llm_result["company_summary"][:500]
-        if llm_result.get("employees_estimate") and not c.get("employee_count"):
+        elif revenue_data.get("description") and not c.get("description"):
+            company_update["description"] = revenue_data["description"]
+        if llm_result.get("employees_estimate") and not c.get("employee_count") and not revenue_data.get("employee_count"):
             emp = llm_result["employees_estimate"]
             company_update["employee_count"] = emp
             sz = ("micro" if emp < 10 else "small" if emp < 50 else
