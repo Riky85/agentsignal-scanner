@@ -1,10 +1,6 @@
 [build]
 builder = "nixpacks"
-buildCommand = "pip install requests"
 
 [deploy]
-startCommand = "python3 feeder_runner.py"
-healthcheckPath = "/"
-healthcheckTimeout = 30
+startCommand = "python3 fix_www_urls.py && python3 feeder_runner.py"
 restartPolicyType = "always"
-restartPolicyMaxRetries = 5
