@@ -562,6 +562,239 @@ SEEDS = [
     ("Dassault Systemes","3ds.com","FR","IIoT",22000,"Dassault provides CATIA, DELMIA MES and 3DEXPERIENCE PLM platform."),
 ]
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# FONTE 5: Companies House UK — API gratuita, 5M+ aziende UK attive
+# SIC codes manifatturieri: 25xxx, 28xxx, 29xxx, 30xxx, 31xxx, 33xxx
+# Richiede API key gratuita: https://developer.company-information.service.gov.uk/
+# ════════════════════════════════════════════════════════════════════════════
+CH_API_KEY = os.getenv("COMPANIES_HOUSE_API_KEY", "")
+CH_SIC_CODES = [
+    "25110","25120","25130","25210","25300","25400","25500","25610","25620","25710","25990",
+    "28110","28120","28130","28140","28150","28210","28220","28230","28240","28250","28290",
+    "28300","28410","28490","28910","28920","28930","28940","28950","28960","28990",
+    "29100","29201","29202","29310","29320",
+    "30110","30120","30200","30300","30400","30910","30920","30990",
+    "33110","33120","33130","33140","33150","33160","33170","33190","33200",
+]
+
+def fetch_companies_house(sic_code, start_index=0):
+    """Cerca aziende UK attive per SIC code manifatturiero."""
+    if not CH_API_KEY:
+        return []
+    results = []
+    try:
+        r = requests.get(
+            "https://api.company-information.service.gov.uk/advanced-search/companies",
+            params={
+                "sic_codes": sic_code,
+                "company_status": "active",
+                "size": 100,
+                "start_index": start_index,
+            },
+            auth=(CH_API_KEY, ""),
+            timeout=15
+        )
+        if r.status_code != 200: return results
+        data = r.json()
+        items = data.get("items", [])
+        for item in items:
+            name = item.get("company_name", "")
+            number = item.get("company_number", "")
+            address = item.get("registered_office_address", {})
+            if not name or len(name.split()) < 2: continue
+            # Costruisci domain dal nome (UK .co.uk o .com)
+            clean = re.sub(r"\b(LIMITED|LTD|PLC|UK|COMPANY|CO|GROUP|HOLDINGS?|INTERNATIONAL)\b", "", name, flags=re.I)
+            clean = re.sub(r"[^a-zA-Z0-9\s]", " ", clean).lower().strip()
+            words = [w for w in clean.split() if len(w) > 2][:2]
+            if len(words) < 2: continue
+            domain = words[0] + words[1] + ".co.uk"
+            results.append((name, domain, "GB", sector_from_sic(sic_code), 200, ""))
+    except Exception as e:
+        print(f"[ch] errore sic={sic_code}: {e}", flush=True)
+    return results
+
+# ════════════════════════════════════════════════════════════════════════════
+# FONTE 6: Wikidata query specifiche per manifattura industriale
+# Filtrate per P452 (industry) su settori specifici
+# ════════════════════════════════════════════════════════════════════════════
+WIKIDATA_INDUSTRIAL_QUERIES = [
+    # Aziende con industry = manufacturing, automation, machinery, robotics
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      ?c wdt:P31 wd:Q4830453 .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      ?c wdt:P452 ?ind .
+      FILTER(?ind IN (wd:Q187939,wd:Q1148747,wd:Q1194970,wd:Q12323988,wd:Q179048,
+                      wd:Q115635290,wd:Q228736,wd:Q184840,wd:Q26540,wd:Q193129,
+                      wd:Q55665185,wd:Q11769,wd:Q213441,wd:Q83323,wd:Q43183)) .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia|youtube"))
+    } LIMIT 500""",
+    # Machine tool / robotics manufacturers
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      VALUES ?subtype { wd:Q891723 wd:Q39546 wd:Q45996 wd:Q1002812 wd:Q234460 }
+      ?c wdt:P31/wdt:P279* ?subtype .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia"))
+    } LIMIT 500""",
+    # Automotive suppliers
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      ?c wdt:P31 wd:Q4830453 .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      ?c wdt:P452 wd:Q1420 .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia"))
+    } LIMIT 500""",
+    # Aerospace manufacturers
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      ?c wdt:P31 wd:Q4830453 .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      ?c wdt:P452 wd:Q1248784 .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia"))
+    } LIMIT 500""",
+    # Electronics manufacturers
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      ?c wdt:P31 wd:Q4830453 .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      ?c wdt:P452 wd:Q11650 .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia"))
+    } LIMIT 500""",
+    # Chemical industry
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      ?c wdt:P31 wd:Q4830453 .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      ?c wdt:P452 wd:Q11348 .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia"))
+    } LIMIT 500""",
+    # Medical devices
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      ?c wdt:P31 wd:Q4830453 .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      ?c wdt:P452 wd:Q212961 .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia"))
+    } LIMIT 500""",
+    # Energy equipment
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      ?c wdt:P31 wd:Q4830453 .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      ?c wdt:P452 wd:Q12748 .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia"))
+    } LIMIT 500""",
+    # Mining equipment
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      ?c wdt:P31 wd:Q4830453 .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      ?c wdt:P452 wd:Q35758 .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia"))
+    } LIMIT 300""",
+    # Food processing
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      ?c wdt:P31 wd:Q4830453 .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      ?c wdt:P452 wd:Q3455524 .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia"))
+    } LIMIT 500""",
+    # Pharmaceutical
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      ?c wdt:P31 wd:Q4830453 .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      ?c wdt:P452 wd:Q507443 .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia"))
+    } LIMIT 500""",
+    # Defense / aerospace
+    """SELECT DISTINCT ?name ?website ?countryCode ?employees WHERE {
+      ?c wdt:P31 wd:Q4830453 .
+      ?c wdt:P856 ?website .
+      ?c rdfs:label ?name FILTER(LANG(?name)="en") .
+      ?c wdt:P17 ?country .
+      ?country wdt:P297 ?countryCode .
+      ?c wdt:P452 wd:Q185359 .
+      OPTIONAL { ?c wdt:P1082 ?employees }
+      FILTER(!REGEX(STR(?website),"linkedin|twitter|facebook|wikipedia"))
+    } LIMIT 300""",
+]
+
+def fetch_wikidata_industrial(sparql_query):
+    """Esegue query Wikidata ottimizzata per manifattura industriale."""
+    results = []
+    try:
+        r = requests.get(
+            "https://query.wikidata.org/sparql",
+            params={"query": sparql_query, "format": "json"},
+            headers={"User-Agent": "AgentSignalIndustrialFeeder/8.0"},
+            timeout=35
+        )
+        if r.status_code != 200:
+            print(f"[wikidata_ind] HTTP {r.status_code}", flush=True)
+            return results
+        bindings = r.json().get("results", {}).get("bindings", [])
+        print(f"[wikidata_ind] {len(bindings)} risultati", flush=True)
+        seen = set()
+        for b in bindings:
+            name = b.get("name", {}).get("value", "")
+            website = b.get("website", {}).get("value", "")
+            country = b.get("countryCode", {}).get("value", "")
+            emp_raw = b.get("employees", {}).get("value", "")
+            if not name or not website: continue
+            if len(name.split()) < 2: continue
+            domain = nd(website)
+            if not domain or len(domain) < 5 or "." not in domain: continue
+            if domain in seen: continue
+            seen.add(domain)
+            bad = ["wikipedia","wikidata","wikimedia","linkedin","facebook",
+                   "twitter","youtube","bloomberg","reuters","instagram"]
+            if any(b in domain for b in bad): continue
+            emp = 500
+            try: emp = int(float(emp_raw)) if emp_raw else 500
+            except: pass
+            country_code = country[:2].upper() if len(country) >= 2 else cc(domain)
+            results.append((name, domain, country_code, "default", emp, ""))
+    except Exception as e:
+        print(f"[wikidata_ind] errore: {e}", flush=True)
+    return results
+
 # ════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ════════════════════════════════════════════════════════════════════════════
@@ -616,6 +849,34 @@ def main():
                 batch_counter = try_insert(name, d, cc_code, "default", 500, "", "gleif", existing, batch_counter)
                 time.sleep(DELAY)
             time.sleep(2)
+
+    # ── FASE 4: Companies House UK ────────────────────────────────────────
+    if CH_API_KEY:
+        stats["source"] = "companies_house"
+        print(f"[v8] FASE 4: Companies House UK ({len(CH_SIC_CODES)} SIC codes)...", flush=True)
+        for sic in CH_SIC_CODES:
+            stats["phase"] = f"ch_{sic}"
+            for start in range(0, 500, 100):  # 500 per SIC code
+                results = fetch_companies_house(sic, start)
+                if not results: break
+                for item in results:
+                    batch_counter = try_insert(*item, "companies_house", existing, batch_counter)
+                    time.sleep(DELAY)
+                time.sleep(1)
+    else:
+        print("[v8] Companies House API key non configurata — skip", flush=True)
+
+    # ── FASE 5: Wikidata queries industriali (più accurate) ───────────────
+    stats["source"] = "wikidata_industrial"
+    print(f"[v8] FASE 5: Wikidata industrial ({len(WIKIDATA_INDUSTRIAL_QUERIES)} query)...", flush=True)
+    for i, query in enumerate(WIKIDATA_INDUSTRIAL_QUERIES):
+        stats["phase"] = f"wikidata_ind_q{i+1}"
+        results = fetch_wikidata_industrial(query)
+        random.shuffle(results)
+        for item in results:
+            batch_counter = try_insert(*item, "wikidata_ind", existing, batch_counter)
+            time.sleep(DELAY)
+        time.sleep(8)  # pausa Wikidata rate limit
 
     # ── LOOP INFINITO: ripete Wikidata ogni 6 ore con query diverse ───────
     print(f"[v8] Loop completato. Inseriti: {stats['inserted']}. Ripeto tra 6 ore.", flush=True)
