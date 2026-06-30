@@ -565,6 +565,144 @@ def fetch_companies_house(sic, start_index=0):
         print(f"[ch/sic={sic}]: {e}", flush=True)
     return results
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# FONTE 4 — Companies House UK Bulk Data (SENZA API KEY)
+# File CSV pubblico mensile: 5M+ aziende UK, filtrare per SIC manifatturiero
+# https://download.companieshouse.gov.uk/BasicCompanyDataAsOneFile-YYYY-MM-01.zip
+# Stima: ~1.1M aziende manifatturiere attive
+# ════════════════════════════════════════════════════════════════════════════
+import zlib, csv as csv_mod, io as io_mod
+
+CH_BULK_URL = "https://download.companieshouse.gov.uk/BasicCompanyDataAsOneFile-2026-06-01.zip"
+CH_DATA_OFFSET = 98  # offset dati compressi nel local file header
+
+CH_MFG_PREFIXES = (
+    "25","26","27","28","29","30","31","32","33",
+    "10","11","12","13","14","15","16","17","18","19",
+    "20","21","22","23","24",
+)
+
+SIC_DESC_TO_SECTOR = {
+    "28": "MachTool", "29": "Auto", "30": "Aero", "33": "MES",
+    "25": "MachTool", "26": "Connect", "27": "Drive", "32": "Metro",
+    "31": "Connect", "24": "MachTool", "20": "Chem", "21": "Pharma",
+    "22": "Plastic", "23": "MachTool", "10": "Food", "11": "Food",
+    "13": "Textile", "14": "Textile", "15": "MachTool", "16": "Wood",
+    "17": "Wood", "18": "MachTool", "19": "Chem",
+}
+
+def fetch_companies_house_bulk(existing, batch_ctr, max_records=500000):
+    """
+    Scarica il CSV bulk Companies House in streaming,
+    filtra per SIC manifatturiero e inserisce nel DB.
+    """
+    print(f"[ch_bulk] Download streaming {CH_BULK_URL}", flush=True)
+    inserted_ch = 0
+    try:
+        r = requests.get(
+            CH_BULK_URL,
+            headers={"User-Agent": "AgentSignal industrial@agentsignal.io"},
+            timeout=120, stream=True
+        )
+        if r.status_code != 200:
+            print(f"[ch_bulk] HTTP {r.status_code}", flush=True)
+            return batch_ctr
+
+        dobj = zlib.decompressobj(wbits=-zlib.MAX_WBITS)
+        buffer = ""
+        header_parsed = False
+        col_name = col_status = col_sic1 = col_country = -1
+        total_bytes = 0
+        first_chunk = True
+
+        for raw_chunk in r.iter_content(chunk_size=2*1024*1024):
+            # Salta header locale ZIP nei primi bytes
+            if first_chunk:
+                raw_chunk = raw_chunk[CH_DATA_OFFSET:]
+                first_chunk = False
+
+            total_bytes += len(raw_chunk)
+            try:
+                decompressed = dobj.decompress(raw_chunk)
+            except zlib.error:
+                break
+
+            buffer += decompressed.decode("utf-8", errors="ignore")
+
+            # Processa linee complete
+            lines = buffer.split("\n")
+            buffer = lines[-1]  # mantieni ultima riga incompleta
+
+            for line in lines[:-1]:
+                if not line.strip():
+                    continue
+
+                if not header_parsed:
+                    cols_h = [c.strip().strip('"') for c in line.split(",")]
+                    try:
+                        col_name    = 0
+                        col_status  = cols_h.index("CompanyStatus")
+                        col_sic1    = cols_h.index("SICCode.SicText_1")
+                        col_country = cols_h.index("RegAddress.Country")
+                        header_parsed = True
+                    except ValueError as e:
+                        print(f"[ch_bulk] Header error: {e}", flush=True)
+                    continue
+
+                try:
+                    row = next(csv_mod.reader([line]))
+                except StopIteration:
+                    continue
+                if len(row) <= col_sic1:
+                    continue
+
+                status = row[col_status].strip()
+                if status != "Active":
+                    continue
+
+                sic_text = row[col_sic1].strip()
+                if not sic_text:
+                    continue
+
+                import re as re_mod
+                sic_match = re_mod.match(r"^(\d{5})", sic_text)
+                if not sic_match:
+                    continue
+
+                sic_num = sic_match.group(1)
+                if not any(sic_num.startswith(p) for p in CH_MFG_PREFIXES):
+                    continue
+
+                name = row[col_name].strip().strip('"')
+                if not name or len(name.split()) < 2:
+                    continue
+
+                sector = SIC_DESC_TO_SECTOR.get(sic_num[:2], "MachTool")
+                domain = build_domain_from_name(name, "GB")
+                if not domain:
+                    continue
+
+                batch_ctr = try_insert(
+                    name, domain, "GB", sector, 50, "",
+                    "ch_bulk", existing, batch_ctr
+                )
+                inserted_ch += 1
+
+                if inserted_ch >= max_records:
+                    print(f"[ch_bulk] Raggiunto limite {max_records}", flush=True)
+                    r.close()
+                    return batch_ctr
+
+            if total_bytes % (50*1024*1024) < 2*1024*1024:
+                print(f"[ch_bulk] {total_bytes//1024//1024}MB processati | inserite: {inserted_ch}", flush=True)
+
+    except Exception as e:
+        print(f"[ch_bulk] Errore: {e}", flush=True)
+
+    print(f"[ch_bulk] ✅ Completato: {inserted_ch} aziende UK inserite", flush=True)
+    return batch_ctr
+
 # ════════════════════════════════════════════════════════════════════════════
 # SEED LIST — 250+ top aziende verificate manualmente
 # ════════════════════════════════════════════════════════════════════════════
@@ -731,7 +869,12 @@ def main():
                     time.sleep(DELAY)
             time.sleep(2)
 
-    # ── FASE 5: Companies House UK ────────────────────────────────────────
+    # ── FASE 5: Companies House UK Bulk (senza API key) ─────────────────
+    stats["source"] = "ch_bulk"
+    print("[v9] FASE 5: Companies House UK Bulk (1.1M aziende manifatturiere)...", flush=True)
+    batch_ctr = fetch_companies_house_bulk(existing, batch_ctr, max_records=200000)
+
+    # ── FASE 6: Companies House API (opzionale, con key) ─────────────────
     if CH_KEY:
         stats["source"] = "companies_house"
         print(f"[v9] FASE 5: Companies House UK...", flush=True)
