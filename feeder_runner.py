@@ -126,7 +126,7 @@ def mkpayload(name, domain, country, sector, emp, desc, source):
     scores = {"Ind Rob":r,"AMR":a,"MES":m,"Vision":v,"Automation":au}
     return {
         "name": name[:200], "domain": domain,
-        "website_url": f"https://{domain}",
+        "website_url": f"https://www.{domain}",
         "country": country, "industry": sector,
         "employee_count": float(e),
         "description": (desc or f"{name} is an industrial company operating in {sector}.")[:500],
