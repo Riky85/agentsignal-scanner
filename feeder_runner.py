@@ -150,12 +150,53 @@ def load_existing():
             b = r.json()
             if not isinstance(b, list) or not b: break
             for c in b:
-                d = nd(c.get("domain") or "")
-                if d: existing.add(d)
+                raw = (c.get("domain") or "").lower().strip()
+                d = re.sub(r"^www\.", "", raw).split("/")[0].strip()
+                if d and "." in d: existing.add(d)
             if len(b) < 500: break
             skip += 500
         except: break
+    print(f"[v9] Loaded {len(existing)} existing domains", flush=True)
     return existing
+
+def startup_dedup():
+    """Pulizia doppioni all'avvio — elimina tutti i duplicati nel DB."""
+    print("[v9] 🧹 Startup dedup...", flush=True)
+    try:
+        all_recs = []
+        skip = 0
+        while True:
+            r = requests.get(
+                f"{BASE}/IndustrialCompany?limit=500&skip={skip}&fields=id,domain",
+                headers=HDRS, timeout=25)
+            batch = r.json()
+            if not isinstance(batch, list) or not batch: break
+            all_recs.extend(batch)
+            if len(batch) < 500: break
+            skip += 500
+
+        domain_seen = {}
+        to_del = []
+        for rec in all_recs:
+            d = re.sub(r"^www\.", "", (rec.get("domain") or "").lower()).split("/")[0].strip()
+            if not d or "." not in d:
+                to_del.append(rec["id"]); continue
+            if d in domain_seen:
+                to_del.append(rec["id"])
+            else:
+                domain_seen[d] = rec["id"]
+            if is_bad_domain(d) and rec["id"] not in to_del:
+                to_del.append(rec["id"])
+
+        print(f"[v9] Startup: trovati {len(to_del)} da eliminare su {len(all_recs)}", flush=True)
+        for rid in to_del:
+            try:
+                requests.delete(f"{BASE}/IndustrialCompany/{rid}", headers=HDRS, timeout=8)
+                time.sleep(0.06)
+            except: pass
+        print(f"[v9] ✅ Startup dedup completato — DB pulito", flush=True)
+    except Exception as e:
+        print(f"[v9] Startup dedup error: {e}", flush=True)
 
 def push(payload, existing):
     d = payload.get("domain","")
@@ -1045,6 +1086,7 @@ SEEDS = [
 def main():
     print("[v9] START — 4 fonti massive + seed list", flush=True)
     stats["phase"] = "loading"
+    startup_dedup()
     existing = load_existing()
     print(f"[v9] DB esistente: {len(existing)} domini", flush=True)
     batch_ctr = 0
