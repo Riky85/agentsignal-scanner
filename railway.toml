@@ -2,5 +2,5 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python3 fix_www_urls.py && python3 feeder_runner.py"
+startCommand = "python3 purge_all.py && python3 feeder_v2_industrial.py"
 restartPolicyType = "always"
