@@ -32,17 +32,28 @@ def clean_domain(url):
     return re.sub(r'^www\.', '', url).split('/')[0]
 
 def scrape_contacts_from_website(domain):
-    """Scrape email, phone, LinkedIn from company website."""
+    """Scrape email, phone, LinkedIn from company website. Tries www. first."""
     result = {}
+    text = ""
+    # Prova www. prima, poi senza
+    for url in [f"https://www.{domain}", f"https://{domain}", f"http://www.{domain}"]:
+        try:
+            resp = requests.get(url, timeout=8,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; ContactBot/1.0)"},
+                verify=False, allow_redirects=True)
+            if resp.status_code == 200:
+                text = resp.text[:50000]
+                break
+        except:
+            continue
+    if not text:
+        return result
     try:
-        resp = requests.get(f"https://{domain}", timeout=8,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; ContactBot/1.0)"}, verify=False)
-        text = resp.text[:50000]
 
         # Email patterns (escludi immagini/script)
         emails = re.findall(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', text)
         good_emails = [e for e in emails if not any(x in e.lower() for x in
-            ['@example','@test','sentry','woff','png','jpg','svg','webpack','noreply','support@','info@','sales@','contact@'])]
+            ['@example','@test','sentry','woff','png','jpg','svg','webpack','noreply'])]
         # Preferisci email dirette (CEO, management)
         mgmt_emails = [e for e in emails if any(x in e.lower() for x in ['ceo','president','director','manager','chief','founder'])]
         result['email'] = mgmt_emails[0] if mgmt_emails else (good_emails[0] if good_emails else None)
