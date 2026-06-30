@@ -172,34 +172,129 @@ def push(payload, existing):
     except Exception as e:
         return False, str(e)
 
-BAD_DOMAINS = {"forbes.com","duke.edu","wikipedia.org","bloomberg.com","reuters.com",
-               "techcrunch.com","linkedin.com","twitter.com","facebook.com","instagram.com",
-               "youtube.com","amazon.com","google.com","apple.com","microsoft.com"}
+# ── Filtri qualità ───────────────────────────────────────────────────────────
+BAD_DOMAINS = {
+    "forbes.com","duke.edu","wikipedia.org","bloomberg.com","reuters.com",
+    "techcrunch.com","linkedin.com","twitter.com","facebook.com","instagram.com",
+    "youtube.com","amazon.com","google.com","apple.com","microsoft.com",
+}
+BAD_DOMAIN_PATTERNS = re.compile(
+    r'(anime|manga|euronews|newspaper|broadcast|television|football|soccer|'
+    r'basketball|luckyfilm|metroradio|magazine|hospital|universit|college|'
+    r'\.school\.|church|ministry|government|reddit|tiktok|pinterest|'
+    r'airlin|entertainment|music|movie|\.film\.|radio|press\.com|news\.)',
+    re.I
+)
+NON_INDUSTRIAL_NAMES = re.compile(
+    r'^(the |le |la |les |il |lo |un |una |una |der |die |das )'
+    r'|(news|journal|times|post|herald|gazette|tribune|magazine|'
+    r'hospital|clinic|church|temple|mosque|school|academy|universit|'
+    r'college|government|ministry|agency|department|bureau|'
+    r'football|soccer|basketball|baseball|cricket|rugby|'
+    r'airline|airways|airport|railway|metro|transit)',
+    re.I
+)
 
-def quality_check():
+def is_bad_domain(domain):
+    if any(bd in domain for bd in BAD_DOMAINS): return True
+    if BAD_DOMAIN_PATTERNS.search(domain): return True
+    return False
+
+def is_bad_name(name):
+    if NON_INDUSTRIAL_NAMES.search(name): return True
+    return False
+
+# ── Quality check autonomo + auto-dedup ──────────────────────────────────────
+_qa_dedup_last_run = 0
+
+def auto_dedup_and_clean():
+    """
+    Scansiona gli ultimi 200 record inseriti.
+    Elimina automaticamente: duplicati per dominio, domini non industriali.
+    Eseguito ogni 50 inserimenti.
+    """
+    global _qa_dedup_last_run
+    now = time.time()
+    if now - _qa_dedup_last_run < 30: return  # min 30s tra run
+    _qa_dedup_last_run = now
+
     try:
         r = requests.get(
-            f"{BASE}/IndustrialCompany?limit=20&sort=-created_date&fields=name,domain,country",
-            headers=HDRS, timeout=15)
-        if r.status_code != 200: return 100, []
+            f"{BASE}/IndustrialCompany?limit=200&sort=-created_date&fields=id,name,domain,country",
+            headers=HDRS, timeout=20
+        )
+        if r.status_code != 200: return
+        records = r.json()
+        if not isinstance(records, list): return
+
         issues = []
-        for c in r.json():
-            name    = c.get("name") or ""
-            country = c.get("country") or "XX"
-            domain  = c.get("domain") or ""
-            if country == "XX":    issues.append(f"country XX: {name}")
-            if len(name.split()) < 2: issues.append(f"nome corto: {name}")
-            if any(bd in domain for bd in BAD_DOMAINS): issues.append(f"dominio non aziendale: {domain}")
-        return max(0, 100 - len(issues)*10), issues
-    except:
-        return 100, []
+        domain_seen = {}
+        to_delete = []
+
+        for rec in records:
+            rid    = rec.get("id","")
+            name   = rec.get("name","") or ""
+            domain = (rec.get("domain","") or "").lower().strip()
+            country = rec.get("country","") or ""
+
+            if not rid or not domain: continue
+
+            # Duplicato
+            if domain in domain_seen:
+                to_delete.append(rid)
+                issues.append(f"dup:{domain}")
+                continue
+            domain_seen[domain] = rid
+
+            # Dominio non industriale
+            if is_bad_domain(domain):
+                to_delete.append(rid)
+                issues.append(f"bad_domain:{domain}")
+                continue
+
+            # Nome non industriale
+            if is_bad_name(name):
+                to_delete.append(rid)
+                issues.append(f"bad_name:{name[:30]}")
+                continue
+
+            # Country XX
+            if country == "XX":
+                issues.append(f"country_XX:{name[:30]}")
+
+        # Elimina i record problematici
+        deleted = 0
+        for rid in to_delete:
+            try:
+                dr = requests.delete(f"{BASE}/IndustrialCompany/{rid}", headers=HDRS, timeout=8)
+                if dr.status_code in (200, 204):
+                    deleted += 1
+                time.sleep(0.05)
+            except: pass
+
+        q_score = max(0, 100 - len(issues) * 5)
+        print(
+            f"[v9] 🔍 AUTO-QC @{stats['inserted']}: score={q_score}% | "
+            f"issues={len(issues)} | deleted={deleted} | "
+            f"{', '.join(issues[:4])}" if issues else
+            f"[v9] ✅ AUTO-QC @{stats['inserted']}: CLEAN (200 record OK)",
+            flush=True
+        )
+        if q_score < 70:
+            stats["qa_alerts"] += 1
+            print(f"[v9] 🚨 QA ALERT #{stats['qa_alerts']} — score {q_score}%", flush=True)
+
+    except Exception as e:
+        print(f"[v9] QC error: {e}", flush=True)
+
 
 def try_insert(name, domain, country, sector, emp, desc, source, existing, batch_ctr):
     d = nd(domain) if domain else ""
     if not d or len(d) < 5 or "." not in d: return batch_ctr
     if not name or len(name.split()) < 2: return batch_ctr
     if d in existing: return batch_ctr
-    if any(bd in d for bd in BAD_DOMAINS): return batch_ctr
+    if is_bad_domain(d): return batch_ctr
+    if is_bad_name(name): return batch_ctr
 
     p = mkpayload(name, d, country, sector, emp, desc, source)
     ok, reason = push(p, existing)
@@ -207,13 +302,9 @@ def try_insert(name, domain, country, sector, emp, desc, source, existing, batch
         stats["inserted"] += 1
         batch_ctr += 1
         print(f"[v9/{source}] ✅ [{stats['inserted']}] {name[:40]} | {d} | {country}", flush=True)
+        # Ogni 50 inserimenti: auto-QC + dedup
         if batch_ctr >= 50:
-            q, issues = quality_check()
-            print(f"[v9] 🔍 QC @{stats['inserted']}: {q}% | {len(issues)} issues", flush=True)
-            for iss in issues[:3]: print(f"  ⚠️  {iss}", flush=True)
-            if q < 80:
-                stats["qa_alerts"] += 1
-                print(f"[v9] 🚨 QUALITY ALERT #{stats['qa_alerts']}", flush=True)
+            auto_dedup_and_clean()
             batch_ctr = 0
     else:
         if reason not in ("dup",):
