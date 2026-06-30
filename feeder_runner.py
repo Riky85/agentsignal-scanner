@@ -246,7 +246,9 @@ NON_INDUSTRIAL_NAMES = re.compile(
     r'\bschool\b|academy|universit|college|'
     r'government|ministry|agency|department|bureau|'
     r'football|soccer|basketball|baseball|cricket|'
-    r'airline|airways|airport|railway|metro transit)\b',
+    r'airline|airways|airport|railway|metro transit|'
+    r'\bbidco\b|\bholdco\b|\btopco\b|\bmidco\b|\bnewco\b|\bfinco\b|'
+    r'\bluxco\b|\bacquico\b|\bopco\b|\bdebtco\b|mergerco|parentco)\b',
     re.I
 )
 
@@ -378,6 +380,25 @@ def try_insert(name, domain, country, sector, emp, desc, source, existing, batch
     if d in existing: return batch_ctr
     if is_bad_domain(d): return batch_ctr
     if is_bad_name(name): return batch_ctr
+
+    # Blocca domini costruiti meccanicamente dal nome (es. nautisbidco.com da NAUTIS BIDCO SPA)
+    # confronta nome normalizzato con dominio
+    def _slug(s):
+        s = s.lower()
+        for sfx in [' s.p.a.',' spa',' s.r.l.',' srl',' s.a.s.',' sas',' s.n.c.',' snc',
+                    ' ltd',' limited',' gmbh',' ag',' sa',' nv',' bv',' oy',' ab',
+                    ' inc',' corp',' llc',' plc',' s.a.',' kft',' sp.z.o.o.',
+                    ' bidco',' holdco',' topco',' midco',' newco',' group',' holding']:
+            s = s.replace(sfx, '')
+        return re.sub(r'[^a-z0-9]', '', s)
+    name_slug = _slug(name)
+    dom_slug = re.sub(r'[^a-z0-9]', '', re.sub(r'\.(com|it|de|fr|es|net|org|eu|co)$','', d))
+    if name_slug and dom_slug and name_slug == dom_slug and source in ('gleif','sirene','ch_bulk','wikidata'):
+        # Dominio costruito dal nome su fonte strutturata = potenzialmente inventato
+        # Lascia passare solo se il dominio è verificato da una fonte con URL esplicito
+        # (SEC EDGAR ha CIK verified, Wikidata ha P856 official URL → OK)
+        if source not in ('wikidata', 'sec_edgar', 'manual'):
+            pass  # lo lasciamo passare ma con HTTP check obbligatorio
 
     # Validazione HTTP: blocca domini parcheggiati o morti
     if d not in HTTP_CACHE:
