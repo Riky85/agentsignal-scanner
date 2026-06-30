@@ -222,17 +222,31 @@ BAD_DOMAINS = {
 BAD_DOMAIN_PATTERNS = re.compile(
     r'(anime|manga|euronews|newspaper|broadcast|television|football|soccer|'
     r'basketball|luckyfilm|metroradio|magazine|hospital|universit|college|'
-    r'\.school\.|church|ministry|government|reddit|tiktok|pinterest|'
-    r'airlin|entertainment|music|movie|\.film\.|radio|press\.com|news\.)',
+    r'church|ministry|government|reddit|tiktok|pinterest|instagram|facebook|'
+    r'twitter|linkedin|youtube|wikipedia|bloomberg|reuters|forbes|'
+    r'airlin|entertainment|music|movie|\\.film\\.|radio|press\\.com|news\\.com|'
+    r'godaddy|sedo\\.com|afternic|namecheap|hugedomains|parkingpage|domainpark|'
+    r'\\.tv$)',
     re.I
 )
 NON_INDUSTRIAL_NAMES = re.compile(
-    r'^(the |le |la |les |il |lo |un |una |una |der |die |das )'
-    r'|(news|journal|times|post|herald|gazette|tribune|magazine|'
-    r'hospital|clinic|church|temple|mosque|school|academy|universit|'
-    r'college|government|ministry|agency|department|bureau|'
-    r'football|soccer|basketball|baseball|cricket|rugby|'
-    r'airline|airways|airport|railway|metro|transit)',
+    r'\b(chiesa|cattedral|basilica|duomo|parrocchi|diocesi|vescov|'
+    r'municipio|comune di|regione |provincia di|prefettura|questura|'
+    r'ospedale|clinica|policlinico|\basl\b|ausl|caseificio|macelleria|panificio|pasticceria|'
+    r'\bcalcio\b|rugby|sportiva dilettant|atletica |piscina|palestra|'
+    r'\bhotel\b|ristorante|trattoria|osteria|pizzeria|albergo|'
+    r'istituto scolastico|liceo|istituto comprensivo|\basilo\b|'
+    r'associazione culturale|circolo ricreativo|biblioteca|museo\b|teatro\b|cinema\b|'
+    r'studio legale|notaio|commercialista|avvocato|\bdentista\b|\bfarmacia\b|'
+    r'\bonlus\b|cooperativa sociale|'
+    r'parish|cathedral|\bchurch\b|\bmosque\b|\btemple\b|synagogue|congregation|'
+    r'\bhospital\b|\bclinic\b|nursing home|care home|hospice|'
+    r'newspaper|broadcasting|\btelevision\b|radio station|tv channel|'
+    r'news|journal|times\b|herald|gazette|tribune|'
+    r'\bschool\b|academy|universit|college|'
+    r'government|ministry|agency|department|bureau|'
+    r'football|soccer|basketball|baseball|cricket|'
+    r'airline|airways|airport|railway|metro transit)\b',
     re.I
 )
 
