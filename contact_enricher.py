@@ -11,7 +11,7 @@ from urllib.parse import quote
 BASE  = os.getenv("B44_API_BASE", "https://app.base44.com/api/apps/6a3a284ab0b87dfa27558bb6/entities")
 TOKEN = os.getenv("B44_SERVICE_TOKEN", "907ed5fef0ae40e1b2e1b01e286a9661")
 HDRS  = {"api-key": TOKEN, "Content-Type": "application/json"}
-HUNTER_KEY = os.getenv("HUNTER_API_KEY", "")
+HUNTER_KEY = os.getenv("HUNTER_API_KEY", "46d3deb4c8435ecf701886920d191bc6d24d3fdf")
 APOLLO_KEY = os.getenv("APOLLO_API_KEY", "")
 DELAY = float(os.getenv("ENRICH_DELAY", "2.0"))
 PORT  = int(os.getenv("PORT", "8080"))
