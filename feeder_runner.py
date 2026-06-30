@@ -507,6 +507,13 @@ GLEIF_KEYWORDS = [
     "forging","heat treatment","surface finishing","coating systems",
 ]
 
+# Country codes con più aziende industriali su GLEIF
+GLEIF_COUNTRIES = [
+    "IT","DE","FR","ES","PL","NL","BE","AT","CH","SE","FI","DK","NO",
+    "CZ","SK","HU","RO","PT","GB","US","JP","KR","CN","AU","CA","IN",
+    "BR","MX","TR","ZA","SG","TW","IL","IE","LU",
+]
+
 def fetch_gleif(keyword, page=1):
     results = []
     try:
@@ -531,6 +538,143 @@ def fetch_gleif(keyword, page=1):
     except Exception as e:
         print(f"[gleif/{keyword}]: {e}", flush=True)
     return results
+
+def fetch_gleif_by_country(country_code, page=1):
+    """
+    Recupera aziende GLEIF per paese specifico — filtra per paese anziché per keyword.
+    IT=233K, DE=235K, FR=164K, ES=~120K, PL=~90K...
+    """
+    results = []
+    try:
+        r = requests.get(
+            "https://api.gleif.org/api/v1/lei-records",
+            params={
+                "filter[entity.legalAddress.country]": country_code,
+                "filter[entity.status]": "ACTIVE",
+                "page[size]": 100,
+                "page[number]": page,
+            },
+            headers={"Accept": "application/vnd.api+json"},
+            timeout=20
+        )
+        if r.status_code != 200: return results, 0
+        d = r.json()
+        total = d.get("meta", {}).get("pagination", {}).get("total", 0)
+        for item in d.get("data", []):
+            entity = item.get("attributes", {}).get("entity", {})
+            name   = entity.get("legalName", {}).get("name", "")
+            if not name or len(name.split()) < 2: continue
+            results.append((name, country_code))
+        return results, total
+    except Exception as e:
+        print(f"[gleif_country/{country_code}]: {e}", flush=True)
+        return [], 0
+
+# ════════════════════════════════════════════════════════════════════════════
+# FONTE 5 — France SIRENE (INSEE)
+# Dataset pubblico: ~12M unità legali, ~600K aziende manifatturiere
+# https://static.data.gouv.fr/resources/.../stock-stockunitelegale-csv.zip
+# ════════════════════════════════════════════════════════════════════════════
+import struct as struct_mod, zlib as zlib_mod, csv as csv_mod2, io as io_mod2
+
+SIRENE_URL = "https://static.data.gouv.fr/resources/base-sirene-des-entreprises-et-de-leurs-etablissements-siren-siret/20260601-091648/stock-stockunitelegale-csv.zip"
+SIRENE_DATA_OFFSET = 55  # local file header size
+
+# NAF codes sezione C = manifattura (10.xx - 33.xx)
+SIRENE_MFG_NAF = tuple(f"{i:02d}" for i in range(10, 34))
+
+# NAF → settore
+NAF_SECTOR = {
+    "10": "Food", "11": "Food", "12": "Chem",
+    "13": "Textile", "14": "Textile", "15": "MachTool",
+    "16": "Wood", "17": "Wood", "18": "MachTool", "19": "Chem",
+    "20": "Chem", "21": "Pharma", "22": "Plastic", "23": "MachTool",
+    "24": "MachTool", "25": "MachTool", "26": "Connect", "27": "Drive",
+    "28": "MachTool", "29": "Auto", "30": "Aero", "31": "Connect",
+    "32": "Metro", "33": "MES",
+}
+
+def fetch_sirene_fr(existing, batch_ctr, max_records=50000):
+    """Scarica SIRENE in streaming, filtra aziende manifatturiere attive."""
+    print(f"[sirene] Download streaming...", flush=True)
+    inserted = 0
+    try:
+        r = requests.get(SIRENE_URL, headers={"User-Agent": "AgentSignal industrial@agentsignal.io"},
+                         timeout=120, stream=True, verify=False)
+        if r.status_code != 200:
+            print(f"[sirene] HTTP {r.status_code}", flush=True)
+            return batch_ctr
+
+        dobj = zlib_mod.decompressobj(wbits=-zlib_mod.MAX_WBITS)
+        buffer = ""
+        header_parsed = False
+        col_nom = col_naf = col_stat = col_sex = -1
+        total_bytes = 0
+        first_chunk = True
+
+        for raw_chunk in r.iter_content(chunk_size=2*1024*1024):
+            if first_chunk:
+                raw_chunk = raw_chunk[SIRENE_DATA_OFFSET:]
+                first_chunk = False
+            total_bytes += len(raw_chunk)
+            try:
+                decompressed = dobj.decompress(raw_chunk)
+            except zlib_mod.error:
+                break
+
+            buffer += decompressed.decode("utf-8", errors="ignore")
+            lines = buffer.split("\n")
+            buffer = lines[-1]
+
+            for line in lines[:-1]:
+                if not line.strip(): continue
+                if not header_parsed:
+                    try:
+                        cols_h = [c.strip() for c in line.split(",")]
+                        col_nom  = cols_h.index("denominationUniteLegale")
+                        col_naf  = cols_h.index("activitePrincipaleUniteLegale")
+                        col_stat = cols_h.index("etatAdministratifUniteLegale")
+                        col_sex  = cols_h.index("sexeUniteLegale")
+                        header_parsed = True
+                    except ValueError:
+                        pass
+                    continue
+
+                try:
+                    row = next(csv_mod2.reader([line]))
+                except StopIteration:
+                    continue
+                if len(row) <= max(col_nom, col_naf, col_stat, col_sex): continue
+
+                # Salta persone fisiche (hanno sesso M/F)
+                if row[col_sex].strip(): continue
+                if row[col_stat].strip() != "A": continue
+
+                naf = row[col_naf].replace(".", "").replace(" ", "")[:4]
+                if not naf or not any(naf.startswith(p) for p in SIRENE_MFG_NAF): continue
+
+                name = row[col_nom].strip().strip('"')
+                if not name or len(name.split()) < 2: continue
+
+                sector = NAF_SECTOR.get(naf[:2], "MachTool")
+                domain = build_domain_from_name(name, "FR")
+                if not domain: continue
+
+                batch_ctr = try_insert(name, domain, "FR", sector, 50, "", "sirene_fr", existing, batch_ctr)
+                inserted += 1
+                if inserted >= max_records:
+                    r.close()
+                    break
+
+            if inserted >= max_records: break
+            if total_bytes % (100*1024*1024) < 2*1024*1024:
+                print(f"[sirene] {total_bytes//1024//1024}MB | inserite: {inserted}", flush=True)
+
+    except Exception as e:
+        print(f"[sirene] Errore: {e}", flush=True)
+
+    print(f"[sirene] ✅ {inserted} aziende FR inserite", flush=True)
+    return batch_ctr
 
 # ════════════════════════════════════════════════════════════════════════════
 # FONTE 4 — Companies House UK (richiede API key gratuita)
@@ -854,8 +998,9 @@ def main():
             time.sleep(2)
         time.sleep(3)
 
-    # ── FASE 4: GLEIF ─────────────────────────────────────────────────────
+    # ── FASE 4: GLEIF by keyword ─────────────────────────────────────────
     stats["source"] = "gleif"
+
     print(f"[v9] FASE 4: GLEIF ({len(GLEIF_KEYWORDS)} keyword)...", flush=True)
     for kw in GLEIF_KEYWORDS:
         stats["phase"] = f"gleif_{kw[:15]}"
@@ -869,7 +1014,31 @@ def main():
                     time.sleep(DELAY)
             time.sleep(2)
 
-    # ── FASE 5: Companies House UK Bulk (senza API key) ─────────────────
+    # ── FASE 4b: GLEIF by country — IT/DE/FR/ES/PL (233K+235K+164K aziende) ─
+    stats["source"] = "gleif_country"
+    print(f"[v9] FASE 4b: GLEIF per paese ({len(GLEIF_COUNTRIES)} paesi)...", flush=True)
+    for country_iso in GLEIF_COUNTRIES:
+        stats["phase"] = f"gleif_{country_iso}"
+        results_c, total_c = fetch_gleif_by_country(country_iso, 1)
+        print(f"[gleif/{country_iso}] totale: {total_c}, pagine: {min(total_c//100+1,50)}", flush=True)
+        max_pages = min(total_c // 100 + 1, 50)  # max 5000 per paese
+        for page in range(1, max_pages + 1):
+            results_c, _ = fetch_gleif_by_country(country_iso, page)
+            if not results_c: break
+            for (name, ctry) in results_c:
+                domain = build_domain_from_name(name, ctry)
+                if domain:
+                    batch_ctr = try_insert(name, domain, ctry, "default", 200, "", f"gleif_{country_iso}", existing, batch_ctr)
+                    time.sleep(DELAY)
+            time.sleep(2)
+        time.sleep(3)
+
+    # ── FASE 5: France SIRENE (NAF manifattura, streaming) ────────────────
+    stats["source"] = "sirene_fr"
+    print("[v9] FASE 5: SIRENE France (streaming, ~600K aziende manifatturiere)...", flush=True)
+    batch_ctr = fetch_sirene_fr(existing, batch_ctr, max_records=100000)
+
+    # ── FASE 6: Companies House UK Bulk (senza API key) ─────────────────
     stats["source"] = "ch_bulk"
     print("[v9] FASE 5: Companies House UK Bulk (1.1M aziende manifatturiere)...", flush=True)
     batch_ctr = fetch_companies_house_bulk(existing, batch_ctr, max_records=200000)
