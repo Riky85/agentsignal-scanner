@@ -343,6 +343,34 @@ def auto_dedup_and_clean():
         print(f"[v9] QC error: {e}", flush=True)
 
 
+def check_domain_live(domain):
+    """Verifica che il dominio sia vivo e NON una parking page."""
+    for scheme in ["https", "http"]:
+        try:
+            r = requests.get(
+                f"{scheme}://www.{domain}", timeout=6,
+                headers={"User-Agent": "Mozilla/5.0"},
+                allow_redirects=True
+            )
+            body = r.text[:3000].lower()
+            # Blocca parking pages / domini in vendita
+            PARKING_SIGNALS = [
+                "this domain is for sale", "buy this domain", "domain for sale",
+                "get this domain", "lease to own", "godaddy",
+                "sedo.com", "afternic", "hugedomains", "dan.com",
+                "underconstruction", "coming soon", "under construction",
+                "this page is parked", "domain parking",
+            ]
+            if any(sig in body for sig in PARKING_SIGNALS):
+                return False, "parking"
+            if r.status_code in (200, 301, 302, 403):
+                return True, "ok"
+        except:
+            pass
+    return False, "unreachable"
+
+HTTP_CACHE = {}  # cache per evitare doppi check
+
 def try_insert(name, domain, country, sector, emp, desc, source, existing, batch_ctr):
     d = nd(domain) if domain else ""
     if not d or len(d) < 5 or "." not in d: return batch_ctr
@@ -350,6 +378,17 @@ def try_insert(name, domain, country, sector, emp, desc, source, existing, batch
     if d in existing: return batch_ctr
     if is_bad_domain(d): return batch_ctr
     if is_bad_name(name): return batch_ctr
+
+    # Validazione HTTP: blocca domini parcheggiati o morti
+    if d not in HTTP_CACHE:
+        live, reason = check_domain_live(d)
+        HTTP_CACHE[d] = (live, reason)
+    else:
+        live, reason = HTTP_CACHE[d]
+    if not live:
+        stats["rejected"] += 1
+        print(f"[v9] 🚫 {name[:30]} | {d} → {reason}", flush=True)
+        return batch_ctr
 
     p = mkpayload(name, d, country, sector, emp, desc, source)
     ok, reason = push(p, existing)
