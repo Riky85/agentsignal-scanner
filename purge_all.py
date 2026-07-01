@@ -1,6 +1,6 @@
 """
-purge_all.py — svuota completamente IndustrialCompany
-poi termina, Railway farà ripartire feeder_runner.py
+purge_all.py — svuota completamente IndustrialCompany poi esce.
+Railway esegue: purge_all.py && feeder_v2_industrial.py
 """
 import requests, time, os, concurrent.futures
 
@@ -9,56 +9,33 @@ APP_ID  = os.environ.get("BASE44_APP_ID",  "6a3a284ab0b87dfa27558bb6")
 BASE    = f"https://app.base44.com/api/apps/{APP_ID}/entities/IndustrialCompany"
 HDRS    = {"api-key": API_KEY}
 
-print("[purge] Avvio svuotamento completo...", flush=True)
+print("[purge] Avvio svuotamento totale DB...", flush=True)
+total = 0
 
-total_deleted = 0
-rounds = 0
+for attempt in range(200):
+    try:
+        b = requests.get(f"{BASE}?limit=200&fields=id", headers=HDRS, timeout=30).json()
+    except Exception as e:
+        print(f"[purge] load err: {e}"); time.sleep(10); continue
 
-while True:
-    rounds += 1
-    # Carica batch di ID
-    ids = []
-    skip = 0
-    while len(ids) < 2000:
-        try:
-            b = requests.get(f"{BASE}?limit=500&skip={skip}&fields=id", headers=HDRS, timeout=30).json()
-            if not isinstance(b, list) or not b: break
-            ids.extend([r['id'] for r in b])
-            if len(b) < 500: break
-            skip += 500
-        except Exception as e:
-            print(f"  [load err] {e}", flush=True)
-            time.sleep(5)
-            break
+    if not isinstance(b, list) or not b:
+        print(f"[purge] ✅ DB vuoto. Eliminati totali: {total}"); break
 
-    if not ids:
-        print(f"[purge] ✅ DB vuoto dopo {rounds} tornate. Totale eliminati: {total_deleted}", flush=True)
-        break
-
-    print(f"[purge] Tornata {rounds}: {len(ids)} record da eliminare...", flush=True)
+    ids = [r['id'] for r in b]
 
     def del_one(rid):
-        for attempt in range(3):
+        for _ in range(3):
             try:
                 r = requests.delete(f"{BASE}/{rid}", headers=HDRS, timeout=10)
-                if r.status_code == 429:
-                    time.sleep(15)
-                    continue
+                if r.status_code == 429: time.sleep(15); continue
                 return r.status_code in (200, 204, 404)
-            except:
-                time.sleep(2)
+            except: time.sleep(3)
         return False
 
-    deleted_this_round = 0
-    BATCH = 20
-    for i in range(0, len(ids), BATCH):
-        chunk = ids[i:i+BATCH]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=BATCH) as ex:
-            deleted_this_round += sum(ex.map(del_one, chunk))
-        time.sleep(0.8)  # rispetta rate limit
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+        deleted = sum(ex.map(del_one, ids))
+    total += deleted
+    print(f"[purge] -{deleted} | tot={total}", flush=True)
+    time.sleep(1)
 
-    total_deleted += deleted_this_round
-    print(f"  Eliminati questa tornata: {deleted_this_round} | Totale: {total_deleted}", flush=True)
-    time.sleep(3)
-
-print("[purge] Completato. Avvio feeder pulito...", flush=True)
+print(f"[purge] Completato. Avvio feeder...", flush=True)
