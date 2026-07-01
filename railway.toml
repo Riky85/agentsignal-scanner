@@ -2,8 +2,8 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python3 feeder_v3_multisource.py"
+startCommand = "python3 launch.py"
 restartPolicyType = "always"
 restartPolicyMaxRetries = 10
 healthcheckPath = "/"
-healthcheckTimeout = 60
+healthcheckTimeout = 90
