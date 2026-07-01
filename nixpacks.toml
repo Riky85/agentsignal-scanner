@@ -1,5 +1,11 @@
-[phases.build]
-cmds = ["pip install -r requirements.txt"]
+[phases.setup]
+nixPkgs = ["python311", "python311Packages.pip"]
+
+[phases.install]
+cmds = [
+  "pip install --upgrade pip",
+  "pip install requests urllib3 beautifulsoup4 lxml trafilatura httpx pydantic python-dotenv tenacity PyYAML"
+]
 
 [start]
 cmd = "python3 launch.py"
