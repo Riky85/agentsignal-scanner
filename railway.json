@@ -4,9 +4,9 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python3 -u ${SCRIPT:-scanner.py}",
+    "startCommand": "python3 launch.py",
     "healthcheckPath": "/",
-    "healthcheckTimeout": 60,
+    "healthcheckTimeout": 90,
     "restartPolicyType": "ALWAYS",
     "restartPolicyMaxRetries": 10
   }
