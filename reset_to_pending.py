@@ -66,12 +66,18 @@ def run_reset():
     status["state"] = "resetting"
     done = 0
     for cid in targets:
-        try:
-            r = requests.put(f"{BASE}/{cid}", json={"scan_status": "pending"}, headers=HDRS, timeout=10)
-            if r.status_code in (200, 201, 204):
-                done += 1
-        except Exception:
-            pass
+        ok = False
+        for attempt in range(4):
+            try:
+                r = requests.put(f"{BASE}/{cid}", json={"scan_status": "pending"}, headers=HDRS, timeout=10)
+                if r.status_code in (200, 201, 204):
+                    ok = True; break
+                if r.status_code == 429:
+                    time.sleep(3 * (attempt + 1)); continue
+                break
+            except Exception:
+                time.sleep(1)
+        if ok: done += 1
         status["reset_done"] = done
         if done % 100 == 0:
             log.info(f"  progresso: {done}/{len(targets)}")
