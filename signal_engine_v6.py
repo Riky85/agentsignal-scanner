@@ -255,12 +255,29 @@ def compute_confidence(pages_ok, total_evidence):
     ev = min(40, total_evidence * 4)
     return min(100, base + ev)
 
-def post_safe(url, payload, timeout=10):
-    try:
-        r = requests.post(url, json=payload, headers=HDRS, timeout=timeout)
-        return r.status_code in (200,201)
-    except Exception:
-        return False
+def post_safe(url, payload, timeout=10, retries=3):
+    for attempt in range(retries):
+        try:
+            r = requests.post(url, json=payload, headers=HDRS, timeout=timeout)
+            if r.status_code in (200,201): return True
+            if r.status_code == 429:
+                time.sleep(2 * (attempt+1)); continue
+            return False
+        except Exception:
+            time.sleep(1)
+    return False
+
+def put_safe(url, payload, timeout=15, retries=4):
+    for attempt in range(retries):
+        try:
+            r = requests.put(url, json=payload, headers=HDRS, timeout=timeout)
+            if r.status_code in (200,201,204): return r
+            if r.status_code == 429:
+                time.sleep(3 * (attempt+1)); continue
+            return r
+        except Exception as e:
+            time.sleep(1)
+    return r
 
 def process_company(rec):
     name = (rec.get("name") or rec.get("domain") or "?")[:40]
@@ -332,7 +349,7 @@ def process_company(rec):
             "recommended_solution": top_solution,
             "pipeline_notes": why_now_summary,
         }
-        r = requests.put(f"{BASE}/{rec['id']}", json=payload, headers=HDRS, timeout=15)
+        r = put_safe(f"{BASE}/{rec['id']}", payload)
         if r.status_code not in (200,201,204):
             with lock: stats["errors"] += 1
             log.warning(f"  ❌ {domain}: HTTP {r.status_code} su company update")
