@@ -5,9 +5,11 @@ Fonte: Wikidata SPARQL (P856=sito ufficiale), multi-country multi-industry.
 Valida ogni URL via HTTP live check prima dell'insert.
 Scrive con schema corretto: source, scan_status='pending', scanned=False.
 Gira in loop continuo, un batch ogni ciclo, poi pausa.
+Include healthcheck HTTP server su $PORT per evitare il kill di Railway.
 """
-import requests, time, re, warnings, json, os, sys
+import requests, time, re, warnings, json, os, threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 warnings.filterwarnings("ignore")
 
@@ -20,9 +22,26 @@ BASE44_APP_ID  = os.environ.get("BASE44_APP_ID", "6a3a284ab0b87dfa27558bb6")
 HDRS_B = {"api-key": BASE44_API_KEY}
 BASE   = f"https://app.base44.com/api/apps/{BASE44_APP_ID}/entities/IndustrialCompany"
 UA     = {"User-Agent": "Mozilla/5.0 Chrome/124 Safari/537.36"}
+PORT   = int(os.environ.get("PORT", 8080))
+
+stats = {"cycle": 0, "inserted_total": 0, "last_cycle_inserted": 0, "status": "starting"}
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        b = json.dumps(stats, default=str).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def log_message(self, *a): pass
+
+threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), H).serve_forever(), daemon=True).start()
 
 def log(msg):
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+
+log(f"[OK] healthcheck server su :{PORT}")
 
 COUNTRIES = {
     "wd:Q38":"IT","wd:Q183":"DE","wd:Q142":"FR","wd:Q39":"CH","wd:Q40":"AT",
@@ -31,13 +50,6 @@ COUNTRIES = {
     "wd:Q17":"JP","wd:Q16":"CA","wd:Q408":"AU","wd:Q45":"PT","wd:Q27":"IE",
     "wd:Q213":"CZ","wd:Q28":"HU",
 }
-COUNTRY_STR_MAP = {v:k for k,v in {
-    "italy":"IT","germany":"DE","france":"FR","switzerland":"CH","austria":"AT",
-    "netherlands":"NL","belgium":"BE","sweden":"SE","denmark":"DK","norway":"NO",
-    "finland":"FI","spain":"ES","poland":"PL","united states":"US","united states of america":"US",
-    "united kingdom":"GB","japan":"JP","canada":"CA","australia":"AU","portugal":"PT",
-    "ireland":"IE","czech republic":"CZ","hungary":"HU","czechia":"CZ",
-}.items()}
 def norm_country(name):
     return {
         "italy":"IT","germany":"DE","france":"FR","switzerland":"CH","austria":"AT",
@@ -148,6 +160,7 @@ def get_existing_domains():
 
 def run_cycle():
     log("=== CICLO FEEDER v5 — inizio ===")
+    stats["status"] = "harvesting"
     existing = get_existing_domains()
     log(f"Domini esistenti nel DB: {len(existing)}")
 
@@ -179,8 +192,10 @@ def run_cycle():
     log(f"Candidati nuovi totali: {len(candidates)}")
     if not candidates:
         log("Nessun nuovo candidato questo ciclo.")
+        stats["last_cycle_inserted"] = 0
         return 0
 
+    stats["status"] = "validating"
     log("Validazione HTTP live (25 worker)...")
     live = []
     with ThreadPoolExecutor(max_workers=25) as ex:
@@ -195,6 +210,7 @@ def run_cycle():
 
     log(f"Live e validati: {len(live)}/{len(candidates)}")
 
+    stats["status"] = "inserting"
     inserted = 0; errors = 0
     for i, c in enumerate(live):
         payload = {k:v for k,v in c.items() if v not in [None,0,""]}
@@ -209,19 +225,27 @@ def run_cycle():
         time.sleep(0.15)
 
     log(f"=== CICLO COMPLETATO: inseriti {inserted}, errori {errors} ===")
+    stats["last_cycle_inserted"] = inserted
+    stats["inserted_total"] += inserted
     return inserted
 
 def main():
     log("Feeder v5 avviato — loop continuo H24")
     while True:
         try:
+            stats["cycle"] += 1
             n = run_cycle()
         except Exception as e:
             log(f"ERRORE CICLO: {e}")
             n = 0
-        pausa = 3600 if n == 0 else 1800  # 1h se ciclo vuoto, 30min altrimenti
+        stats["status"] = "sleeping"
+        pausa = 3600 if n == 0 else 1800
         log(f"Pausa {pausa//60} minuti prima del prossimo ciclo...")
-        time.sleep(pausa)
+        # sleep a piccoli step cosi il main thread resta reattivo e l'HTTP server (in thread separato) risponde comunque
+        slept = 0
+        while slept < pausa:
+            time.sleep(min(30, pausa - slept))
+            slept += 30
 
 if __name__ == "__main__":
     main()
