@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-signal_engine_v3.py — Motore segnali industriali alta qualità
-Fix chiave vs v2:
-  - Salva scan_status="scanned" dopo ogni scan → niente ri-scansioni
-  - Keyword multilingua (IT/DE/FR/EN)
-  - 4 score distinti con pesi calibrati
-  - Skip intelligente basato su scan_status nel DB
+signal_engine_v3.py — Motore segnali industriali
+- scan_status="scanned" salvato dopo ogni scan (fix bug v2)
+- Keyword multilingua IT+DE+FR+EN
+- Check qualità ogni 50 scan (non blocca la scansione)
 """
 import os, re, json, time, logging, threading, requests, warnings
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -23,12 +21,16 @@ PORT    = int(os.environ.get("PORT", 8080))
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
       "Accept": "text/html,*/*", "Accept-Language": "en-US,en;q=0.9,it;q=0.8,de;q=0.7,fr;q=0.6"}
 
-stats = {"scanned": 0, "unreachable": 0, "errors": 0, "cycle": 0,
-         "current": "", "queue": 0, "good_signals": 0}
+stats = {
+    "scanned": 0, "unreachable": 0, "errors": 0,
+    "cycle": 0, "current": "", "queue": 0,
+    "good_signals": 0, "last_quality_check": "never",
+    "quality": {"total_scanned": 0, "with_signal": 0, "top_opps": {}}
+}
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = json.dumps(stats).encode()
+        body = json.dumps(stats, default=str).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -39,8 +41,7 @@ class H(BaseHTTPRequestHandler):
 threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), H).serve_forever(), daemon=True).start()
 log.info(f"[OK] Healthcheck :{PORT}")
 
-# ── KEYWORD MULTILINGUA (EN + IT + DE + FR) ──────────────────
-
+# ── KEYWORD MULTILINGUA ───────────────────────────────────────
 AUTO_KW = [
     "robot","cobot","cnc","plc","scada","automation","conveyor","agv","amr",
     "machine vision","welding robot","pick and place","servo motor","hmi",
@@ -52,7 +53,6 @@ AUTO_KW = [
     "robot industriel","automatisation","soudage robotisé","convoyeur",
     "usinage cnc","bras robotique","chaîne automatisée",
 ]
-
 ROBOT_KW = [
     "manual welding","manual assembly","heavy lifting","robotic cell",
     "robot integration","repetitive task","hazardous","palletizing","palletizer",
@@ -65,19 +65,17 @@ ROBOT_KW = [
     "soudage manuel","assemblage manuel","manutention manuelle",
     "production en série","fournisseur automobile",
 ]
-
 MES_KW = [
     "mes","erp","oee","iiot","industry 4.0","digital twin","traceability",
-    "production monitoring","opc ua","real-time data","downtime tracking",
-    "batch tracking","work order","iso 9001","iso 13485","cfr part 11",
-    "industria 4.0","gestione produzione","tracciabilità","monitoraggio produzione",
+    "production monitoring","opc ua","real-time data","downtime",
+    "batch tracking","work order","iso 9001","iso 13485",
+    "industria 4.0","tracciabilità","monitoraggio produzione",
     "manutenzione predittiva","gemello digitale","efficienza impianto",
-    "industrie 4.0","produktionsüberwachung","rückverfolgbarkeit",
-    "predictive maintenance","digitaler zwilling","anlageneffizienz",
-    "industrie 4.0","suivi de production","traçabilité","jumeau numérique",
-    "maintenance prédictive","efficacité industrielle",
+    "industrie 4.0","rückverfolgbarkeit","predictive maintenance",
+    "digitaler zwilling","anlageneffizienz","produktionsüberwachung",
+    "industrie 4.0","traçabilité","maintenance prédictive",
+    "jumeau numérique","efficacité industrielle","suivi de production",
 ]
-
 INTENT_KW = [
     "new plant","capacity expansion","new factory","greenfield","hiring",
     "automation engineer","robotics engineer","modernization","retrofit",
@@ -93,8 +91,7 @@ INTENT_KW = [
 
 def fetch(url, timeout=7):
     try:
-        r = requests.get(url, headers=UA, timeout=timeout,
-                         verify=False, allow_redirects=True)
+        r = requests.get(url, headers=UA, timeout=timeout, verify=False, allow_redirects=True)
         if r.status_code == 200 and len(r.content) > 300:
             t = re.sub(r'<script[^>]*>.*?</script>', ' ', r.text, flags=re.S)
             t = re.sub(r'<style[^>]*>.*?</style>',  ' ', t,      flags=re.S)
@@ -114,55 +111,48 @@ def scan(rec):
     if not base_url.startswith("http"):
         base_url = f"https://www.{domain}"
 
-    # Pagine da scansionare
-    pages = [
-        base_url,
-        f"{base_url}/prodotti",    f"{base_url}/products",
-        f"{base_url}/solutions",   f"{base_url}/soluzioni",
-        f"{base_url}/technologie", f"{base_url}/technology",
-        f"{base_url}/careers",     f"{base_url}/lavora-con-noi",
-        f"{base_url}/jobs",        f"{base_url}/about",
-    ]
-
-    full_text = ""
-    pages_fetched = 0
-    for url in pages:
+    text = ""
+    pages_ok = 0
+    for url in [base_url,
+                f"{base_url}/prodotti",    f"{base_url}/products",
+                f"{base_url}/solutions",   f"{base_url}/soluzioni",
+                f"{base_url}/technologie", f"{base_url}/technology",
+                f"{base_url}/careers",     f"{base_url}/lavora-con-noi",
+                f"{base_url}/jobs",        f"{base_url}/about"]:
         t = fetch(url)
         if t:
-            full_text += " " + t
-            pages_fetched += 1
-        if len(full_text) > 30000:
+            text += " " + t
+            pages_ok += 1
+        if len(text) > 30000:
             break
 
-    if len(full_text.strip()) < 200:
+    if len(text.strip()) < 200:
         return {"scan_status": "unreachable",
                 "last_scan_date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
-    # ── Calcola score ─────────────────────────────────────────
-    a_hits  = [k for k in AUTO_KW   if k in full_text]
-    ro_hits = [k for k in ROBOT_KW  if k in full_text]
-    m_hits  = [k for k in MES_KW    if k in full_text]
-    i_hits  = [k for k in INTENT_KW if k in full_text]
+    a_hits  = [k for k in AUTO_KW   if k in text]
+    ro_hits = [k for k in ROBOT_KW  if k in text]
+    m_hits  = [k for k in MES_KW    if k in text]
+    i_hits  = [k for k in INTENT_KW if k in text]
 
     auto_s   = min(100, len(a_hits)  * 12)
     robot_s  = min(100, len(ro_hits) * 18)
     mes_s    = min(100, len(m_hits)  * 14)
     intent_s = min(100, len(i_hits)  * 15)
 
-    # ── Raccomandazione ───────────────────────────────────────
     scores = {
-        "Robotics & Cobot Integration":    robot_s,
-        "MES / Digital Factory":           mes_s,
-        "Industrial Automation Upgrade":   auto_s,
+        "Robotics & Cobot Integration":     robot_s,
+        "MES / Digital Factory":            mes_s,
+        "Industrial Automation Upgrade":    auto_s,
         "Proactive Outreach – High Intent": intent_s,
     }
     top      = max(scores, key=scores.get)
     best_val = scores[top]
 
     ev_map = {
-        "Robotics & Cobot Integration":    ro_hits[:5],
-        "MES / Digital Factory":           m_hits[:5],
-        "Industrial Automation Upgrade":   a_hits[:5],
+        "Robotics & Cobot Integration":     ro_hits[:5],
+        "MES / Digital Factory":            m_hits[:5],
+        "Industrial Automation Upgrade":    a_hits[:5],
         "Proactive Outreach – High Intent": i_hits[:5],
     }
 
@@ -172,7 +162,6 @@ def scan(rec):
     else:
         solution = "Signals: " + ", ".join(ev_map[top])
 
-    # ── Deal estimate EUR ────────────────────────────────────
     emp = int(float(rec.get("employee_count") or 0))
     if   emp > 5000: dmin, dmax = 300000, 2000000
     elif emp > 500:  dmin, dmax = 80000,  500000
@@ -194,16 +183,62 @@ def scan(rec):
         "estimated_deal_value_max":    dmax,
         "estimated_deal_min":          dmin,
         "estimated_deal_max":          dmax,
-        # FIX CHIAVE: salva scan_status e data
         "scan_status":                 "scanned",
         "last_scan_date":              time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "ats_documentation":           f"pages={pages_fetched} | "
-                                       f"auto={auto_s} robot={robot_s} "
-                                       f"mes={mes_s} intent={intent_s}",
+        "ats_documentation":           f"pages={pages_ok} auto={auto_s} robot={robot_s} mes={mes_s} intent={intent_s}",
     }
 
-def load_pending(limit=100):
-    """Carica aziende NON ancora scansionate dal DB."""
+def quality_check():
+    """Analisi qualità su tutto il DB scansionato — non blocca."""
+    log.info("  ── QUALITY CHECK ──")
+    try:
+        skip=0; total=0; with_sig=0; opps={}; top10=[]
+        while True:
+            b = requests.get(
+                f"{BASE}?limit=500&skip={skip}"
+                f"&fields=scan_status,top_opportunity,buying_intent_score,"
+                f"robotics_opportunity_score,automation_readiness_score,mes_opportunity_score,name",
+                headers=HDRS, timeout=20).json()
+            if not isinstance(b,list) or not b: break
+            for x in b:
+                if x.get("scan_status") == "scanned":
+                    total += 1
+                    opp = x.get("top_opportunity") or ""
+                    bi  = int(x.get("buying_intent_score") or 0)
+                    if opp and opp != "Low Signal – Monitor":
+                        with_sig += 1
+                        opps[opp] = opps.get(opp, 0) + 1
+                    if bi >= 30:
+                        top10.append((bi, x.get("name","?")))
+            skip += 500
+            if len(b) < 500: break
+
+        top10.sort(reverse=True)
+        signal_rate = round(with_sig / total * 100, 1) if total else 0
+
+        log.info(f"  Scansionati totali: {total}")
+        log.info(f"  Con segnale utile:  {with_sig} ({signal_rate}%)")
+        log.info(f"  Distribuzione opportunità:")
+        for k,v in sorted(opps.items(), key=lambda x:-x[1]):
+            log.info(f"    {v:4}  {k}")
+        if top10:
+            log.info(f"  Top aziende per buying intent:")
+            for score, name in top10[:5]:
+                log.info(f"    intent={score}  {name}")
+
+        stats["quality"] = {
+            "total_scanned": total,
+            "with_signal": with_sig,
+            "signal_rate_pct": signal_rate,
+            "top_opps": opps,
+        }
+        stats["last_quality_check"] = time.strftime("%H:%M:%S")
+        log.info("  ── END QUALITY CHECK ──")
+    except Exception as e:
+        log.warning(f"  quality_check error: {e}")
+
+def load_pending(limit=120):
+    """Carica aziende non ancora scansionate."""
     results = []
     skip = 0
     while len(results) < limit:
@@ -213,83 +248,64 @@ def load_pending(limit=100):
                 f"&fields=id,name,domain,website_url,employee_count,scan_status,country",
                 headers=HDRS, timeout=20).json()
         except Exception as e:
-            log.warning(f"load_pending error: {e}")
-            break
-        if not isinstance(b, list) or not b:
-            break
+            log.warning(f"load_pending: {e}"); break
+        if not isinstance(b, list) or not b: break
         for r in b:
             if r.get("scan_status") not in ("scanned", "unreachable"):
                 results.append(r)
-                if len(results) >= limit:
-                    break
-        if len(b) < 200:
-            break
+                if len(results) >= limit: break
+        if len(b) < 200: break
         skip += 200
     return results
 
-# ── PRIORITY ORDER: IT → DE → FR → ES → US → resto ──────────
 PRIORITY = {
-    "ITA","IT","ITALY",
-    "DEU","DE","DD","GERMANY",
-    "FRA","FR","FRANCE",
-    "ESP","ES","SPAIN",
-    "CHE","CH","SWITZERLAND",
-    "AUT","AT","AUSTRIA",
-    "NLD","NL","NETHERLANDS",
-    "BEL","BE","BELGIUM",
-    "USA","US","UNITED STATES",
-    "GBR","GB","UK",
-    "JPN","JP","JAPAN",
+    "ITA","IT","ITALY","DEU","DE","DD","GERMANY","FRA","FR","FRANCE",
+    "ESP","ES","SPAIN","CHE","CH","SWITZERLAND","AUT","AT","AUSTRIA",
+    "NLD","NL","NETHERLANDS","BEL","BE","BELGIUM","POL","PL","POLAND",
+    "USA","US","UNITED STATES","GBR","GB","UK","JPN","JP","JAPAN",
 }
 
 # ── MAIN LOOP ─────────────────────────────────────────────────
 log.info("=== SIGNAL ENGINE V3 START ===")
-log.info("Fix: scan_status='scanned' salvato dopo ogni scan")
-log.info("Feature: keyword IT+DE+FR+EN, 4 score distinti")
+log.info("Quality check ogni 50 scan, scansione continua")
+
+scan_count_since_check = 0
 
 while True:
     stats["cycle"] += 1
-    log.info(f"\n{'='*50}")
-    log.info(f"CICLO {stats['cycle']} — carico batch da scansionare...")
-
-    batch = load_pending(limit=150)
+    batch = load_pending(limit=120)
     stats["queue"] = len(batch)
 
     if not batch:
-        log.info("DB completamente scansionato. Pausa 2h poi ri-ciclo.")
+        log.info("DB completamente scansionato. Quality check finale + pausa 2h.")
+        quality_check()
         time.sleep(7200)
         continue
 
-    # Ordina: paesi prioritari prima
     batch.sort(key=lambda x: (0 if (x.get("country") or "").upper().strip() in PRIORITY else 1))
-    log.info(f"Batch: {len(batch)} aziende (priorità IT/DE/FR/US in testa)")
+    log.info(f"[C{stats['cycle']}] Batch {len(batch)} (priorità IT/DE/FR/US)")
 
     for rec in batch:
-        name   = (rec.get("name") or rec.get("domain") or "?")[:40]
+        name   = (rec.get("name") or rec.get("domain") or "?")[:38]
         domain = rec.get("domain", "?")
         stats["current"] = domain
 
         try:
             result = scan(rec)
-
-            r = requests.put(
-                f"{BASE}/{rec['id']}",
-                json=result,
-                headers=HDRS,
-                timeout=15)
+            r = requests.put(f"{BASE}/{rec['id']}", json=result, headers=HDRS, timeout=15)
 
             if r.status_code in (200, 201, 204):
                 if result["scan_status"] == "scanned":
                     stats["scanned"] += 1
-                    best = max(
-                        result["automation_readiness_score"],
-                        result["robotics_opportunity_score"],
-                        result["mes_opportunity_score"],
-                        result["buying_intent_score"])
+                    scan_count_since_check += 1
+                    best = max(result["automation_readiness_score"],
+                               result["robotics_opportunity_score"],
+                               result["mes_opportunity_score"],
+                               result["buying_intent_score"])
                     if best >= 20:
                         stats["good_signals"] += 1
                     log.info(
-                        f"  ✅ {name:40} | "
+                        f"  ✅ {name:40} "
                         f"auto={result['automation_readiness_score']:3} "
                         f"robot={result['robotics_opportunity_score']:3} "
                         f"mes={result['mes_opportunity_score']:3} "
@@ -300,15 +316,20 @@ while True:
                     log.info(f"  ⚠️  {name}: unreachable")
             else:
                 stats["errors"] += 1
-                log.warning(f"  ❌ {domain}: HTTP {r.status_code} {r.text[:60]}")
+                log.warning(f"  ❌ {domain}: HTTP {r.status_code}")
 
         except Exception as e:
             stats["errors"] += 1
             log.warning(f"  ❌ {domain}: {e}")
 
+        # ── Quality check ogni 50 scan, NON blocca ───────────
+        if scan_count_since_check >= 50:
+            scan_count_since_check = 0
+            quality_check()  # eseguito inline, ~5 secondi, poi si riprende
+
         time.sleep(1.0)
 
     log.info(
-        f"Ciclo {stats['cycle']} DONE — "
+        f"[C{stats['cycle']}] DONE — "
         f"scanned={stats['scanned']} unreachable={stats['unreachable']} "
-        f"good_signals={stats['good_signals']} errors={stats['errors']}")
+        f"good={stats['good_signals']} errors={stats['errors']}")
