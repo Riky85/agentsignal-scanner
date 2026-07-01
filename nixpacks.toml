@@ -2,4 +2,4 @@
 cmds = ["pip install -r requirements.txt"]
 
 [start]
-cmd = "python3 feeder_v3_multisource.py"
+cmd = "python3 launch.py"
