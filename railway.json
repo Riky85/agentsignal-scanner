@@ -1,13 +1,13 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
-    "builder": "NIXPACKS"
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile"
   },
   "deploy": {
     "startCommand": "python3 launch.py",
     "healthcheckPath": "/",
     "healthcheckTimeout": 90,
-    "restartPolicyType": "ALWAYS",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyType": "ALWAYS"
   }
 }
