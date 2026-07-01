@@ -1,1 +1,4 @@
 requests
+aiohttp
+asyncpg
+urllib3
