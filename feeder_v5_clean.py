@@ -59,10 +59,22 @@ def norm_country(name):
         "ireland":"IE","czech republic":"CZ","hungary":"HU","czechia":"CZ",
     }.get((name or "").lower().strip(), (name or "")[:2].upper())
 
+# Lista VERIFICATA manualmente (2026-07-01) — i codici precedenti erano corrotti
+# (includevano Bitcoin, geyser, Hells Angels, mathematician: nulla a che fare con industria!)
 INDUSTRIES = [
-    "Q187939","Q11012","Q179818","Q83471","Q131723","Q170790","Q82604","Q11032",
-    "Q28179","Q132541","Q184358","Q106239","Q28294","Q17162","Q898364","Q11661",
-    "Q13235160","Q210167","Q1341478","Q1128557","Q327738","Q622188","Q1341433",
+    "Q187939",   # industrial manufacturing
+    "Q13235160", # manufacturer
+    "Q190117",   # automotive industry
+    "Q936518",   # aerospace manufacturer
+    "Q5358497",  # electronics industry
+    "Q1307914",  # electronics manufacturing services
+    "Q1957908",  # manufacture of machinery and equipment
+    "Q207652",   # chemical industry
+    "Q540912",   # food industry
+    "Q607081",   # textile industry
+    "Q507443",   # pharmaceutical industry
+    "Q953045",   # metalworking
+    "Q7202108",  # plastics industry
 ]
 COUNTRY_STR  = ",".join(COUNTRIES.keys())
 INDUSTRY_STR = ",".join(f"wd:{i}" for i in INDUSTRIES)
@@ -94,7 +106,9 @@ NON_IND = re.compile(
     r'university|hospital|school|charity|non.?profit|ngo|onlus|'
     r'yarn|garn|textile fashion|underwear|lingerie|furniture retailer|'
     r'hunting|gun shop|weapon|pistol|amusement ride|newspaper publisher|'
-    r'winery|brewery|dairy|museum|bank\b|insurance\b)\b', re.I)
+    r'winery|brewery|dairy|museum|bank\b|insurance\b|'
+    r'information technology|software company|video game|game developer|'
+    r'it services|it consulting|web design|app developer)\b', re.I)
 
 def fetch_batch(offset, retries=4):
     q = build_query(offset, 1000)
