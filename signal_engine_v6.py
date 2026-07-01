@@ -399,34 +399,62 @@ def process_company(rec):
         with lock: stats["errors"] += 1
         log.warning(f"  ❌ {domain}: {str(e)[:150]}")
 
+def _norm_name(n):
+    n = (n or "").lower().strip()
+    n = re.sub(r'\s*\([^)]*\)\s*$', '', n)   # rimuove "(Japan)", "(Germany)" ecc. in coda
+    n = re.sub(r'\b(inc|inc\.|ltd|ltd\.|llc|gmbh|s\.p\.a\.|spa|s\.r\.l\.|srl|corp|corporation|co\.|company|ag|sa|nv|bv)\b', '', n)
+    n = re.sub(r'[^a-z0-9]+', '', n)
+    return n
+
 def dedup_pass():
-    """Dedup leggero: un solo GET paginato (id+domain), delete solo se trova doppioni reali."""
+    """Dedup leggero: un solo GET paginato, poi 2 livelli — website esatto E nome normalizzato+paese."""
     try:
         skip=0; recs=[]
         while True:
-            b = requests.get(f"{BASE}?limit=500&skip={skip}&fields=id,domain,created_date",
+            b = requests.get(f"{BASE}?limit=500&skip={skip}&fields=id,name,domain,country,created_date",
                              headers=HDRS, timeout=20).json()
             if not isinstance(b,list) or not b: break
             recs.extend(b); skip += 500
             if len(b) < 500: break
+
         from collections import defaultdict
+        to_delete = {}
+
+        # Livello 1: stesso dominio esatto (regola primaria da istruzioni utente)
         by_domain = defaultdict(list)
         for r in recs:
             d = (r.get("domain") or "").lower().strip().replace("www.","")
             if d: by_domain[d].append(r)
-        removed = 0
         for d, v in by_domain.items():
             if len(v) <= 1: continue
             v.sort(key=lambda x: x.get("created_date") or "")
             for extra in v[1:]:
-                try:
-                    rr = requests.delete(f"{BASE}/{extra['id']}", headers=HDRS, timeout=8)
-                    if rr.status_code in (200,204): removed += 1
-                except Exception:
-                    pass
-                time.sleep(0.1)
+                to_delete[extra["id"]] = extra
+
+        # Livello 2: stesso nome normalizzato + stesso paese ma dominio diverso
+        # (es. EagleBurgmann eagleburgmann.jp vs eagleburgmann.com — stessa azienda, 2 record)
+        by_name_country = defaultdict(list)
+        for r in recs:
+            if r["id"] in to_delete: continue
+            key = (_norm_name(r.get("name")), (r.get("country") or "").upper())
+            if key[0]: by_name_country[key].append(r)
+        for key, v in by_name_country.items():
+            if len(v) <= 1: continue
+            v.sort(key=lambda x: x.get("created_date") or "")
+            for extra in v[1:]:
+                to_delete[extra["id"]] = extra
+
+        removed = 0
+        for cid in to_delete:
+            try:
+                rr = requests.delete(f"{BASE}/{cid}", headers=HDRS, timeout=8)
+                if rr.status_code in (200,204): removed += 1
+            except Exception:
+                pass
+            time.sleep(0.1)
+
         if removed:
-            log.info(f"  🧹 Dedup: rimossi {removed} record duplicati")
+            log.info(f"  🧹 Dedup: rimossi {removed} record duplicati (dominio+nome/paese)")
         else:
             log.info("  🧹 Dedup: nessun doppione trovato")
         with lock: stats["last_dedup"] = {"time": time.strftime("%H:%M:%S"), "removed": removed}
