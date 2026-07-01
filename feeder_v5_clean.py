@@ -228,15 +228,22 @@ def run_cycle():
     inserted = 0; errors = 0
     for i, c in enumerate(live):
         payload = {k:v for k,v in c.items() if v not in [None,0,""]}
-        try:
-            r = requests.post(BASE, json=payload, headers=HDRS_B, timeout=10)
-            if r.status_code in (200,201): inserted += 1
-            else: errors += 1
-        except Exception:
-            errors += 1
+        ok = False
+        for attempt in range(3):
+            try:
+                r = requests.post(BASE, json=payload, headers=HDRS_B, timeout=10)
+                if r.status_code in (200,201):
+                    ok = True; break
+                if r.status_code == 429:
+                    time.sleep(3*(attempt+1)); continue
+                break
+            except Exception:
+                time.sleep(1)
+        if ok: inserted += 1
+        else: errors += 1
         if (i+1) % 100 == 0:
             log(f"  insert progresso: {i+1}/{len(live)} inseriti={inserted} errori={errors}")
-        time.sleep(0.15)
+        time.sleep(0.25)
 
     log(f"=== CICLO COMPLETATO: inseriti {inserted}, errori {errors} ===")
     stats["last_cycle_inserted"] = inserted
