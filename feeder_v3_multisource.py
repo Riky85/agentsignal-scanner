@@ -126,6 +126,9 @@ def upsert(company: dict) -> bool:
     for opt in ("city", "description", "employee_count", "revenue"):
         if company.get(opt): payload[opt] = company[opt]
 
+    # Aggiungi subito a cache per prevenire doppi insert concorrenti
+    KNOWN_DOMAINS.add(domain)
+
     # Cerca record esistente per domain
     try:
         existing = requests.get(
