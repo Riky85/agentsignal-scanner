@@ -1,3 +1,4 @@
+# redeploy: 2026-07-01 06:06 UTC
 """
 feeder_v2_industrial.py
 ========================
