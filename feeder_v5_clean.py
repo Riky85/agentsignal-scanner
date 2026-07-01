@@ -43,12 +43,25 @@ def log(msg):
 
 log(f"[OK] healthcheck server su :{PORT}")
 
+# Copertura mondiale bilanciata: Europa, Nord America, Asia, Oceania, Sud America, Africa, Medio Oriente
 COUNTRIES = {
+    # Europa
     "wd:Q38":"IT","wd:Q183":"DE","wd:Q142":"FR","wd:Q39":"CH","wd:Q40":"AT",
     "wd:Q55":"NL","wd:Q31":"BE","wd:Q34":"SE","wd:Q35":"DK","wd:Q20":"NO",
-    "wd:Q33":"FI","wd:Q29":"ES","wd:Q36":"PL","wd:Q30":"US","wd:Q145":"GB",
-    "wd:Q17":"JP","wd:Q16":"CA","wd:Q408":"AU","wd:Q45":"PT","wd:Q27":"IE",
-    "wd:Q213":"CZ","wd:Q28":"HU",
+    "wd:Q33":"FI","wd:Q29":"ES","wd:Q36":"PL","wd:Q145":"GB","wd:Q45":"PT",
+    "wd:Q27":"IE","wd:Q213":"CZ","wd:Q28":"HU","wd:Q218":"RO","wd:Q214":"SK",
+    "wd:Q215":"SI",
+    # Nord America
+    "wd:Q30":"US","wd:Q16":"CA","wd:Q96":"MX",
+    # Asia
+    "wd:Q17":"JP","wd:Q668":"IN","wd:Q148":"CN","wd:Q884":"KR","wd:Q334":"SG",
+    "wd:Q865":"TW","wd:Q869":"TH","wd:Q252":"ID","wd:Q881":"VN",
+    # Oceania
+    "wd:Q408":"AU","wd:Q664":"NZ",
+    # Sud America
+    "wd:Q155":"BR","wd:Q414":"AR",
+    # Africa / Medio Oriente
+    "wd:Q258":"ZA","wd:Q43":"TR","wd:Q801":"IL","wd:Q878":"AE",
 }
 def norm_country(name):
     return {
@@ -79,19 +92,21 @@ INDUSTRIES = [
 COUNTRY_STR  = ",".join(COUNTRIES.keys())
 INDUSTRY_STR = ",".join(f"wd:{i}" for i in INDUSTRIES)
 
-def build_query(offset, limit=1000):
+def build_query(country_wd, offset, limit=300):
+    """Query filtrata su UN SOLO paese per volta, per garantire copertura mondiale
+    bilanciata invece di un blocco unico dove Wikidata puo' restituire risultati
+    sbilanciati verso un singolo paese (es. tutto Giappone in un ciclo)."""
     return f"""
     SELECT DISTINCT ?company ?companyLabel ?website ?countryLabel ?employees ?industryLabel WHERE {{
       ?company wdt:P31 wd:Q4830453 .
       ?company wdt:P856 ?website .
-      ?company wdt:P17 ?country .
-      FILTER(?country IN ({COUNTRY_STR}))
+      ?company wdt:P17 {country_wd} .
       ?company wdt:P452 ?industry .
       FILTER(?industry IN ({INDUSTRY_STR}))
       OPTIONAL {{ ?company wdt:P1128 ?employees }}
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,it,de,fr" .
         ?company rdfs:label ?companyLabel .
-        ?country rdfs:label ?countryLabel .
+        {country_wd} rdfs:label ?countryLabel .
         ?industry rdfs:label ?industryLabel .
       }}
     }}
@@ -110,18 +125,18 @@ NON_IND = re.compile(
     r'information technology|software company|video game|game developer|'
     r'it services|it consulting|web design|app developer)\b', re.I)
 
-def fetch_batch(offset, retries=4):
-    q = build_query(offset, 1000)
+def fetch_batch(country_wd, offset, limit=300, retries=3):
+    q = build_query(country_wd, offset, limit)
     for attempt in range(retries):
         try:
             r = requests.get(SPARQL_URL, params={"query": q, "format":"json"},
-                             headers=HEADERS_WD, timeout=100)
+                             headers=HEADERS_WD, timeout=60)
             if r.status_code == 200:
                 return r.json().get("results",{}).get("bindings",[])
-            log(f"  SPARQL HTTP {r.status_code} offset {offset} tentativo {attempt+1}")
+            log(f"  SPARQL HTTP {r.status_code} {country_wd} tentativo {attempt+1}")
         except Exception as e:
-            log(f"  SPARQL errore offset {offset} tentativo {attempt+1}: {str(e)[:100]}")
-        time.sleep(8*(attempt+1))
+            log(f"  SPARQL errore {country_wd} tentativo {attempt+1}: {str(e)[:100]}")
+        time.sleep(5*(attempt+1))
     return []
 
 def parse_rows(rows):
@@ -179,28 +194,22 @@ def run_cycle():
     log(f"Domini esistenti nel DB: {len(existing)}")
 
     all_new = {}
-    empty_streak = 0
-    for offset in range(0, 20000, 1000):
-        rows = fetch_batch(offset)
-        if not rows:
-            empty_streak += 1
-            log(f"  offset {offset}: 0 righe (streak {empty_streak})")
-            if empty_streak >= 3:
-                log("  3 offset vuoti di fila, fine harvesting per questo ciclo")
-                break
-            continue
-        empty_streak = 0
+    # Rotazione paese-per-paese: garantisce copertura mondiale bilanciata ad ogni ciclo,
+    # invece di un unico blocco che puo' risultare dominato da un solo paese.
+    # L'offset avanza nel tempo (per ciclo) cosi' col passare dei cicli si scava piu' a fondo
+    # per ogni singolo paese, senza mai concentrarsi su uno solo.
+    per_country_offset = (stats["cycle"] % 15) * 300
+    country_items = list(COUNTRIES.items())
+    for country_wd, code in country_items:
+        rows = fetch_batch(country_wd, per_country_offset, limit=300)
         parsed = parse_rows(rows)
         new_here = 0
         for c in parsed:
             if c["domain"] not in existing and c["domain"] not in all_new:
                 all_new[c["domain"]] = c
                 new_here += 1
-        log(f"  offset {offset}: {len(rows)} righe, {new_here} nuovi (tot ciclo {len(all_new)})")
-        if len(rows) < 1000:
-            log("  ultima pagina raggiunta")
-            break
-        time.sleep(2)
+        log(f"  {code} (offset {per_country_offset}): {len(rows)} righe, {new_here} nuovi (tot ciclo {len(all_new)})")
+        time.sleep(1)
 
     candidates = list(all_new.values())
     log(f"Candidati nuovi totali: {len(candidates)}")
