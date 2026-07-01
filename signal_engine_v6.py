@@ -95,9 +95,10 @@ AMR_AGV_KW = ["warehouse expansion","internal logistics","material handling","fo
 AMR_SOLUTIONS = {"default":"AMR Fleet","agv":"AGV Deployment","warehouse":"Warehouse Automation",
                  "material handling":"Material Handling Automation"}
 
-MES_KW = ["mes","scada","oee","downtime","production monitoring","traceability","shop floor",
+MES_KW = [" mes ","mes system","mes software","scada","oee","downtime","production monitoring","traceability","shop floor",
           "digital factory","industry 4.0","smart factory","plc","hmi","opc ua","siemens",
           "rockwell","schneider","wincc","ignition","production planning","performance monitoring"]
+# nota: "mes" nudo rimosso — matchava dentro "times","comes","homes","themes","resumes","sometimes" (falso positivo grave)
 MES_SOLUTIONS = {"default":"MES / OEE Monitoring","scada":"SCADA Upgrade","plc":"PLC / HMI Retrofit",
                  "iot":"Industrial IoT Platform"}
 
@@ -121,21 +122,24 @@ OPP_CATEGORIES = {
     "maintenance":{"kw":MAINT_KW,   "field":"maintenance_opportunity_score", "cat":"maintenance", "sol":MAINT_SOLUTIONS, "weight":12},
 }
 
+# Nota: "hiring"/"careers"/"join our team" rimossi deliberatamente — sono link standard
+# presenti su quasi ogni sito aziendale e diluivano il buying intent score con rumore.
+# L'hiring specifico (job titles reali) resta tracciato separatamente in detect_jobs().
 INTENT_KW = ["new manufacturing plant","new production facility","greenfield plant","brownfield expansion",
              "capacity expansion","production capacity increase","new factory opening","plant expansion",
              "new assembly line","new production line","capital expenditure","capex investment",
              "technology investment","equipment investment","machinery investment","automation investment",
              "digital transformation","industry 4.0 implementation","lean transformation",
              "manufacturing modernization","machine retrofit","equipment upgrade","production line upgrade",
-             "acquisition","new plant","new machinery","sustainability investment","operational efficiency",
-             "hiring","careers","join our team","we are hiring"]
+             "acquisition","new plant","new machinery","sustainability investment","operational efficiency"]
 
 # ─────────────────────────── TECHNOLOGY VENDORS ───────────────────────────
 TECH_VENDORS = {
     "plc_automation": ["siemens","rockwell","allen-bradley","allen bradley","schneider electric","omron",
                        "beckhoff","mitsubishi electric","b&r automation","phoenix contact"],
     "scada_hmi": ["wincc","ignition scada","wonderware","factorytalk","aveva","ifix"],
-    "mes_erp": ["sap","oracle erp","microsoft dynamics","infor","epicor"," mes "],
+    "mes_erp": ["sap erp","sap hana","sap s/4hana","sap business one","running on sap","sap consultant",
+                "oracle erp","microsoft dynamics","infor","epicor"," mes "],  # "sap" nudo rimosso: falso positivo su "ASAP"/"disappear"
     "cad_plm": ["solidworks","autocad","siemens nx","ptc creo","catia","autodesk","teamcenter"],
     "robotics": ["universal robots","abb robot","fanuc","kuka","yaskawa","omron robot","mobile industrial robots"," mir ","onrobot","robotiq"],
 }
