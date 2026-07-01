@@ -1,1 +1,1 @@
-web: python3 -u scanner.py
+worker: python3 feeder_v2_industrial.py
