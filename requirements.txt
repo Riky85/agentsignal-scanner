@@ -2,9 +2,3 @@ requests
 urllib3
 beautifulsoup4
 lxml
-trafilatura
-httpx
-pydantic
-python-dotenv
-tenacity
-PyYAML
