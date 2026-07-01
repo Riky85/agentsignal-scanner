@@ -399,6 +399,40 @@ def process_company(rec):
         with lock: stats["errors"] += 1
         log.warning(f"  ❌ {domain}: {str(e)[:150]}")
 
+def dedup_pass():
+    """Dedup leggero: un solo GET paginato (id+domain), delete solo se trova doppioni reali."""
+    try:
+        skip=0; recs=[]
+        while True:
+            b = requests.get(f"{BASE}?limit=500&skip={skip}&fields=id,domain,created_date",
+                             headers=HDRS, timeout=20).json()
+            if not isinstance(b,list) or not b: break
+            recs.extend(b); skip += 500
+            if len(b) < 500: break
+        from collections import defaultdict
+        by_domain = defaultdict(list)
+        for r in recs:
+            d = (r.get("domain") or "").lower().strip().replace("www.","")
+            if d: by_domain[d].append(r)
+        removed = 0
+        for d, v in by_domain.items():
+            if len(v) <= 1: continue
+            v.sort(key=lambda x: x.get("created_date") or "")
+            for extra in v[1:]:
+                try:
+                    rr = requests.delete(f"{BASE}/{extra['id']}", headers=HDRS, timeout=8)
+                    if rr.status_code in (200,204): removed += 1
+                except Exception:
+                    pass
+                time.sleep(0.1)
+        if removed:
+            log.info(f"  🧹 Dedup: rimossi {removed} record duplicati")
+        else:
+            log.info("  🧹 Dedup: nessun doppione trovato")
+        with lock: stats["last_dedup"] = {"time": time.strftime("%H:%M:%S"), "removed": removed}
+    except Exception as e:
+        log.warning(f"dedup error: {e}")
+
 def quality_check():
     log.info("── QC ──")
     try:
@@ -418,6 +452,7 @@ def quality_check():
         with lock:
             stats["qc"] = {"total":total,"pending":pending,"good":good,"rate":rate}
             stats["last_qc"] = time.strftime("%H:%M:%S")
+        dedup_pass()
     except Exception as e:
         log.warning(f"qc error: {e}")
 
