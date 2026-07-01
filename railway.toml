@@ -1,6 +1,9 @@
 [build]
 builder = "dockerfile"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "python3 launch.py"
 restartPolicyType = "always"
+restartPolicyMaxRetries = 10
+healthcheckPath = "/"
+healthcheckTimeout = 90
