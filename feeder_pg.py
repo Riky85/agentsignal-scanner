@@ -71,6 +71,17 @@ INDUSTRIES = [
     "Q187939","Q13235160","Q190117","Q936518","Q5358497","Q1307914","Q1957908",
     "Q207652","Q540912","Q607081","Q507443","Q953045","Q7202108",
     "Q1945600","Q2283886","Q474200","Q26897133","Q13747706","Q13405640","Q2986369","Q1341478",
+    # batch 2 (2026-07-02): validati via SPARQL count>=14 aziende con sito web ciascuna
+    "Q56604576",  # packaging industry (25)
+    "Q2151621",   # energy industry (297)
+    "Q3477381",   # automotive supplier (62)
+    "Q4899370",   # beverage industry (221)
+    "Q63383285",  # medical technology industry (40)
+    "Q3477363",   # aerospace industry (526)
+    "Q2285982",   # iron and steel industry (250)
+    "Q785222",    # glass production (14)
+    "Q995609",    # wood industry (15)
+    "Q474883",    # water collection, treatment and supply (42)
 ]
 INDUSTRY_STR = ",".join(f"wd:{i}" for i in INDUSTRIES)
 
@@ -162,14 +173,23 @@ def build_query(country_wd, offset, limit=300):
     OFFSET {offset}
     """
 
-def fetch_batch(country_wd, offset, limit=300, retries=3):
+SPARQL_SESSION = requests.Session()
+SPARQL_SESSION.headers.update(HEADERS_WD)
+VALIDATE_SESSION = requests.Session()
+VALIDATE_SESSION.headers.update(UA)
+
+def fetch_batch(country_wd, offset, limit=300, retries=4):
     q = build_query(country_wd, offset, limit)
     for attempt in range(retries):
         try:
-            r = requests.get(SPARQL_URL, params={"query": q, "format":"json"},
-                             headers=HEADERS_WD, timeout=60)
+            r = SPARQL_SESSION.get(SPARQL_URL, params={"query": q, "format":"json"}, timeout=60)
             if r.status_code == 200:
                 return r.json().get("results",{}).get("bindings",[])
+            if r.status_code == 429:
+                wait = 20*(attempt+1)
+                log(f"  SPARQL 429 rate-limit {country_wd} — pausa {wait}s (tentativo {attempt+1})")
+                time.sleep(wait)
+                continue
             log(f"  SPARQL HTTP {r.status_code} {country_wd} tentativo {attempt+1}")
         except Exception as e:
             log(f"  SPARQL errore {country_wd} tentativo {attempt+1}: {str(e)[:100]}")
@@ -219,7 +239,7 @@ def parse_rows(rows):
 def check_url(c):
     for u in [f"https://www.{c['domain']}", f"https://{c['domain']}"]:
         try:
-            r = requests.get(u, headers=UA, timeout=6, verify=False, allow_redirects=True)
+            r = VALIDATE_SESSION.get(u, timeout=6, verify=False, allow_redirects=True)
             if r.status_code < 400:
                 c["website_url"] = u
                 return c
