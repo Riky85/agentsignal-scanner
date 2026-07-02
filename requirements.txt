@@ -2,3 +2,4 @@ requests
 aiohttp
 asyncpg
 urllib3
+psycopg2-binary
