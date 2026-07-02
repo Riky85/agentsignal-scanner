@@ -31,7 +31,7 @@ def get_conn():
     return psycopg2.connect(PG_DSN, connect_timeout=15, cursor_factory=RealDictCursor)
 
 PORT = int(os.environ.get("PORT", 8080))
-WORKERS = int(os.environ.get("SCAN_WORKERS", 12))
+WORKERS = int(os.environ.get("SCAN_WORKERS", 16))
 SIGNAL_THRESHOLD = 8
 
 UA = {"User-Agent": "Mozilla/5.0 Chrome/124 Safari/537.36",
@@ -70,6 +70,11 @@ INDUSTRY_KW = {
     "Textile": ["textile manufacturer","textile production","fabric mill","tessile"],
     "Construction Materials": ["construction materials","building materials","cement production","materiali da costruzione"],
     "Industrial Components": ["industrial components","mechanical components","precision components","componenti industriali"],
+    "Steel & Metals": ["steel producer","steel manufacturer","iron and steel","metal producer","stahlindustrie","acciaieria"],
+    "Energy": ["energy production","power generation","renewable energy","energy company","energieerzeugung"],
+    "Aerospace & Defense": ["aerospace industry","aircraft manufacturer","defense contractor","aviation supplier"],
+    "Water & Utilities": ["water treatment","water utility","wastewater treatment","water supply company"],
+    "Glass & Ceramics": ["glass manufacturer","glass production","ceramics manufacturer","glasindustrie"],
 }
 
 # ─────────────────────────── PROCESS SIGNALS ───────────────────────────
@@ -131,19 +136,34 @@ INTENT_KW = ["new manufacturing plant","new production facility","greenfield pla
              "technology investment","equipment investment","machinery investment","automation investment",
              "digital transformation","industry 4.0 implementation","lean transformation",
              "manufacturing modernization","machine retrofit","equipment upgrade","production line upgrade",
-             "acquisition","new plant","new machinery","sustainability investment","operational efficiency"]
+             "acquisition","new plant","new machinery","sustainability investment","operational efficiency",
+             # German (DE/AT/CH sites are very often local-language only)
+             "neue produktionslinie","kapazitätserweiterung","werkserweiterung","neues werk","investition in automatisierung",
+             "digitalisierung","industrie 4.0","neubau produktion","standorterweiterung","modernisierung der produktion",
+             # Italian (IT sites)
+             "nuovo stabilimento","ampliamento produttivo","nuova linea di produzione","investimento in automazione",
+             "digitalizzazione","industria 4.0","ampliamento capacità produttiva","nuovo impianto",
+             # French (FR/BE/CH sites)
+             "nouvelle ligne de production","extension de capacité","nouvelle usine","investissement automatisation",
+             "transformation digitale","industrie 4.0","modernisation de la production"]
 
 # Growth/expansion signals -> short "Why Now" tags (title case, 2-3 words, English)
 GROWTH_TAG_MAP = [
-    (["new production facility","new manufacturing plant","greenfield plant","new factory opening","new plant"], "New Facility"),
-    (["new assembly line","new production line"], "New Production Line"),
-    (["capacity expansion","production capacity increase","plant expansion","brownfield expansion"], "Plant Expansion"),
+    (["new production facility","new manufacturing plant","greenfield plant","new factory opening","new plant",
+      "neues werk","neubau produktion","nuovo stabilimento","nuovo impianto","nouvelle usine"], "New Facility"),
+    (["new assembly line","new production line","neue produktionslinie","nuova linea di produzione",
+      "nouvelle ligne de production"], "New Production Line"),
+    (["capacity expansion","production capacity increase","plant expansion","brownfield expansion",
+      "kapazitätserweiterung","werkserweiterung","standorterweiterung","ampliamento produttivo",
+      "ampliamento capacità produttiva","extension de capacité"], "Plant Expansion"),
     (["warehouse expansion","warehouse automation"], "Warehouse Expansion"),
-    (["digital transformation","industry 4.0 implementation","smart factory"], "Digital Transformation"),
+    (["digital transformation","industry 4.0 implementation","smart factory","digitalisierung","industrie 4.0",
+      "digitalizzazione","industria 4.0","transformation digitale"], "Digital Transformation"),
     (["automation investment","equipment investment","machinery investment","technology investment",
-      "capital expenditure","capex investment"], "Automation Investment"),
+      "capital expenditure","capex investment","investition in automatisierung","investimento in automazione",
+      "investissement automatisation"], "Automation Investment"),
     (["acquisition"], "Recent Acquisition"),
-    (["machine retrofit","equipment upgrade","production line upgrade"], "Equipment Upgrade"),
+    (["machine retrofit","equipment upgrade","production line upgrade","modernisierung der produktion"], "Equipment Upgrade"),
     (["sustainability investment"], "Sustainability Investment"),
     (["lean transformation","manufacturing modernization"], "Manufacturing Modernization"),
     (["new machinery"], "New Machinery"),
@@ -152,19 +172,26 @@ GROWTH_TAG_MAP = [
 # ─────────────────────────── TECHNOLOGY VENDORS ───────────────────────────
 TECH_VENDORS = {
     "plc_automation": ["siemens","rockwell","allen-bradley","allen bradley","schneider electric","omron",
-                       "beckhoff","mitsubishi electric","b&r automation","phoenix contact"],
-    "scada_hmi": ["wincc","ignition scada","wonderware","factorytalk","aveva","ifix"],
+                       "beckhoff","mitsubishi electric","b&r automation","phoenix contact","abb automation",
+                       "yokogawa","emerson automation","honeywell process","bosch rexroth","festo","sew eurodrive",
+                       "wago","rittal","pilz safety","turck","ifm electronic","pepperl+fuchs","keyence"],
+    "scada_hmi": ["wincc","ignition scada","wonderware","factorytalk","aveva","ifix","citect scada","movicon","zenon scada"],
     "mes_erp": ["sap erp","sap hana","sap s/4hana","sap business one","running on sap","sap consultant",
-                "oracle erp","microsoft dynamics","infor","epicor"," mes "],  # bare "sap" removed: false positive on "ASAP"/"disappear"
-    "cad_plm": ["solidworks","autocad","siemens nx","ptc creo","catia","autodesk","teamcenter"],
-    "robotics": ["universal robots","abb robot","fanuc","kuka","yaskawa","omron robot","mobile industrial robots"," mir ","onrobot","robotiq"],
+                "oracle erp","microsoft dynamics","infor","epicor"," mes ","siemens opcenter","critical manufacturing",
+                "dassault delmia","plex systems","qad erp","netsuite erp","iqms","proalpha"],
+    "cad_plm": ["solidworks","autocad","siemens nx","ptc creo","catia","autodesk","teamcenter","windchill plm"],
+    "robotics": ["universal robots","abb robot","fanuc","kuka","yaskawa","omron robot","mobile industrial robots",
+                 " mir ","onrobot","robotiq","stäubli robotics","staubli robotics","denso robotics","epson robots"],
+    "iiot_platform": ["ptc thingworx","c3 ai","litmus edge","azure iot","aws iot","predix ge","cumulocity"],
 }
 
 # ─────────────────────────── JOB TITLES ───────────────────────────
 JOB_TITLES = ["automation engineer","plc programmer","robotics engineer","manufacturing engineer",
               "production engineer","process engineer","maintenance technician","industrial electrician",
               "cnc operator","warehouse operator","logistics manager","quality control technician",
-              "mes specialist","scada engineer","controls engineer","plant manager","operations manager"]
+              "mes specialist","scada engineer","controls engineer","plant manager","operations manager",
+              "automation technician","controls technician","robotics technician","iot engineer",
+              "digitalization manager","industry 4.0 manager","lean manufacturing engineer","continuous improvement engineer"]
 
 # Short "Hiring X" why-now tags per job title
 JOB_TAG_MAP = {
@@ -176,7 +203,11 @@ JOB_TAG_MAP = {
     "logistics manager":"Hiring Logistics Manager", "quality control technician":"Hiring QC Technician",
     "mes specialist":"Hiring MES Specialist", "scada engineer":"Hiring SCADA Engineer",
     "controls engineer":"Hiring Controls Engineer", "plant manager":"Hiring Plant Manager",
-    "operations manager":"Hiring Operations Manager",
+    "operations manager":"Hiring Operations Manager", "automation technician":"Hiring Automation Technician",
+    "controls technician":"Hiring Controls Technician", "robotics technician":"Hiring Robotics Technician",
+    "iot engineer":"Hiring IoT Engineer", "digitalization manager":"Hiring Digitalization Manager",
+    "industry 4.0 manager":"Hiring Industry 4.0 Manager", "lean manufacturing engineer":"Hiring Lean Engineer",
+    "continuous improvement engineer":"Hiring CI Engineer",
 }
 
 TOP_LABELS = {"robotics":"Robotics & Cobot","amr_agv":"AMR / AGV","mes_scada":"MES/SCADA/OEE",
@@ -206,11 +237,28 @@ def _is_valid_email(cand):
     return True
 
 # ─────────────────────────── FETCH ───────────────────────────
-def fetch(url, timeout=6):
+from requests.adapters import HTTPAdapter, Retry
+
+def make_session():
+    """One Session per company: all ~9 page fetches to the same host reuse the same TCP/TLS
+    connection (keep-alive) instead of a fresh handshake each time — faster and lighter on
+    both ends. Built-in retry adapter absorbs transient 502/503/504 without extra code."""
+    s = requests.Session()
+    s.headers.update(UA)
+    retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[502, 503, 504],
+                   allowed_methods=frozenset(["GET"]))
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+def fetch(url, session=None, timeout=6):
     """Returns {'text': cleaned lowercase text for keyword matching, 'raw': html with tags kept
     (minus script/style) for extracting hrefs like mailto:/tel:/linkedin links)."""
     try:
-        r = requests.get(url, headers=UA, timeout=timeout, verify=False, allow_redirects=True)
+        req = session or requests
+        r = req.get(url, timeout=timeout, verify=False, allow_redirects=True,
+                    headers=None if session else UA)
         if r.status_code == 200 and len(r.content) > 300:
             raw = r.text
             raw_clean = re.sub(r'<script[^>]*>.*?</script>', ' ', raw, flags=re.S)
@@ -223,7 +271,8 @@ def fetch(url, timeout=6):
     return {"text": "", "raw": ""}
 
 def gather_pages(base_url):
-    """Returns dict {page_name: {'text':.., 'raw':..}} for homepage + key pages incl. contact."""
+    """Returns dict {page_name: {'text':.., 'raw':..}} for homepage + key pages incl. contact.
+    All pages share ONE session (connection reuse to the same host = faster + fewer handshakes)."""
     urls = {
         "home": base_url,
         "products": f"{base_url}/products",
@@ -236,12 +285,16 @@ def gather_pages(base_url):
         "press": f"{base_url}/press",
     }
     out = {}
-    with ThreadPoolExecutor(max_workers=9) as ex:
-        futs = {ex.submit(fetch, u): k for k, u in urls.items()}
-        for f in as_completed(futs):
-            k = futs[f]
-            r = f.result()
-            if r["text"]: out[k] = r
+    session = make_session()
+    try:
+        with ThreadPoolExecutor(max_workers=9) as ex:
+            futs = {ex.submit(fetch, u, session): k for k, u in urls.items()}
+            for f in as_completed(futs):
+                k = futs[f]
+                r = f.result()
+                if r["text"]: out[k] = r
+    finally:
+        session.close()
     return out, urls
 
 # ─────────────────────────── DETECTION (page-aware) ───────────────────────────
@@ -556,9 +609,12 @@ def process_company(rec, conn):
         cur.close()
 
 def _norm_name(n):
+    import unicodedata
     n = (n or "").lower().strip()
     n = re.sub(r'\s*\([^)]*\)\s*$', '', n)
     n = re.sub(r'\b(inc|inc\.|ltd|ltd\.|llc|gmbh|s\.p\.a\.|spa|s\.r\.l\.|srl|corp|corporation|co\.|company|ag|sa|nv|bv)\b', '', n)
+    # normalizza accenti/umlaut: Güdel -> Gudel, così matcha eventuali varianti senza dieresi
+    n = unicodedata.normalize('NFKD', n).encode('ascii', 'ignore').decode('ascii')
     n = re.sub(r'[^a-z0-9]+', '', n)
     return n
 
@@ -602,6 +658,29 @@ def dedup_pass(conn):
         conn.rollback()
         log.warning(f"dedup error: {e}")
 
+def retry_stale_unreachable(conn, days=10, batch_cap=300):
+    """Websites marked 'unreachable' might have been down temporarily (maintenance, blip,
+    rate limiting) rather than genuinely dead. Retry a capped batch of the oldest ones
+    periodically instead of losing them forever."""
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE industrial_company SET scan_status='pending'
+            WHERE id IN (
+                SELECT id FROM industrial_company
+                WHERE scan_status='unreachable' AND last_scan_date < now() - (%s || ' days')::interval
+                ORDER BY last_scan_date ASC LIMIT %s
+            )
+        """, (days, batch_cap))
+        n = cur.rowcount
+        conn.commit()
+        if n:
+            log.info(f"  Retry unreachable: {n} companies older than {days}d requeued for a second attempt")
+        cur.close()
+    except Exception as e:
+        conn.rollback()
+        log.warning(f"retry_stale_unreachable error: {e}")
+
 def quality_check(conn):
     log.info("-- QC --")
     try:
@@ -622,6 +701,7 @@ def quality_check(conn):
             stats["last_qc"] = time.strftime("%H:%M:%S")
         cur.close()
         dedup_pass(conn)
+        retry_stale_unreachable(conn)
     except Exception as e:
         conn.rollback()
         log.warning(f"qc error: {e}")
