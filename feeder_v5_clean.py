@@ -101,22 +101,57 @@ INDUSTRIES = [
 COUNTRY_STR  = ",".join(COUNTRIES.keys())
 INDUSTRY_STR = ",".join(f"wd:{i}" for i in INDUSTRIES)
 
+# Tassi di cambio approssimati verso EUR (2026, da aggiornare periodicamente) — usati solo
+# per normalizzare il fatturato Wikidata (P2139) in milioni di EUR. Non serve precisione al
+# centesimo: e' un ordine di grandezza per qualificare i prospect, non un dato contabile.
+FX_TO_EUR = {
+    "United States dollar": 0.92, "Euro": 1.0, "Pound sterling": 1.17,
+    "Japanese yen": 0.0062, "Renminbi": 0.128, "Swiss franc": 1.05,
+    "Canadian dollar": 0.68, "Australian dollar": 0.61, "Indian rupee": 0.011,
+    "South Korean won": 0.00068, "Swedish krona": 0.087, "Norwegian krone": 0.085,
+    "Danish krone": 0.134, "Polish zloty": 0.23, "Czech koruna": 0.040,
+    "Hungarian forint": 0.0025, "Mexican peso": 0.047, "Brazilian real": 0.16,
+    "Turkish lira": 0.026, "Israeli new shekel": 0.25, "United Arab Emirates dirham": 0.25,
+    "New Taiwan dollar": 0.029, "Singapore dollar": 0.68, "Thai baht": 0.026,
+    "Indonesian rupiah": 0.000057, "Vietnamese dong": 0.000037, "South African rand": 0.049,
+    "Argentine peso": 0.00095, "Romanian leu": 0.20,
+}
+def revenue_to_eur_millions(amount, unit_label):
+    try:
+        amt = float(amount)
+    except (TypeError, ValueError):
+        return None
+    rate = FX_TO_EUR.get(unit_label)
+    if rate is None:
+        return None
+    return round(amt * rate / 1_000_000, 2)
+
 def build_query(country_wd, offset, limit=300):
     """Query filtrata su UN SOLO paese per volta, per garantire copertura mondiale
     bilanciata invece di un blocco unico dove Wikidata puo' restituire risultati
-    sbilanciati verso un singolo paese (es. tutto Giappone in un ciclo)."""
+    sbilanciati verso un singolo paese (es. tutto Giappone in un ciclo).
+    Include anche il fatturato reale (P2139, se presente su Wikidata) con data e valuta."""
     return f"""
-    SELECT DISTINCT ?company ?companyLabel ?website ?countryLabel ?employees ?industryLabel WHERE {{
+    SELECT DISTINCT ?company ?companyLabel ?website ?countryLabel ?employees ?industryLabel
+                     ?revAmount ?revUnitLabel ?revDate WHERE {{
       ?company wdt:P31 wd:Q4830453 .
       ?company wdt:P856 ?website .
       ?company wdt:P17 {country_wd} .
       ?company wdt:P452 ?industry .
       FILTER(?industry IN ({INDUSTRY_STR}))
       OPTIONAL {{ ?company wdt:P1128 ?employees }}
+      OPTIONAL {{
+        ?company p:P2139 ?revStmt .
+        ?revStmt psv:P2139 ?revValue .
+        ?revValue wikibase:quantityAmount ?revAmount ;
+                  wikibase:quantityUnit ?revUnit .
+        OPTIONAL {{ ?revStmt pq:P585 ?revDate }}
+      }}
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,it,de,fr" .
         ?company rdfs:label ?companyLabel .
         {country_wd} rdfs:label ?countryLabel .
         ?industry rdfs:label ?industryLabel .
+        ?revUnit rdfs:label ?revUnitLabel .
       }}
     }}
     LIMIT {limit}
@@ -149,7 +184,9 @@ def fetch_batch(country_wd, offset, limit=300, retries=3):
     return []
 
 def parse_rows(rows):
-    out = []
+    # Ogni azienda puo' comparire su piu' righe (una per anno di fatturato riportato su
+    # Wikidata): raggruppiamo per dominio e teniamo solo il fatturato piu' recente (revDate max).
+    by_domain = {}
     for row in rows:
         url  = row.get("website",{}).get("value","").strip().rstrip("/")
         name = row.get("companyLabel",{}).get("value","")
@@ -161,14 +198,34 @@ def parse_rows(rows):
         emp = 0
         try: emp = int(row.get("employees",{}).get("value","0"))
         except: pass
-        out.append({
-            "name": name[:100], "domain": domain,
-            "website_url": f"https://www.{domain}",
-            "country": norm_country(row.get("countryLabel",{}).get("value","")),
-            "industry": row.get("industryLabel",{}).get("value","Manufacturing")[:60],
-            "employee_count": emp, "source": "wikidata_P856",
-            "scan_status": "pending", "scanned": False,
-        })
+
+        rev_date = row.get("revDate",{}).get("value","")
+        rev_amount = row.get("revAmount",{}).get("value")
+        rev_unit = row.get("revUnitLabel",{}).get("value")
+        rev_eur_m = revenue_to_eur_millions(rev_amount, rev_unit) if rev_amount else None
+
+        c = by_domain.get(domain)
+        if c is None:
+            c = {
+                "name": name[:100], "domain": domain,
+                "website_url": f"https://www.{domain}",
+                "country": norm_country(row.get("countryLabel",{}).get("value","")),
+                "industry": row.get("industryLabel",{}).get("value","Manufacturing")[:60],
+                "employee_count": emp, "source": "wikidata_P856",
+                "scan_status": "pending", "scanned": False,
+                "_rev_date": "", "revenue_eur_m": None,
+            }
+            by_domain[domain] = c
+        if rev_eur_m is not None and rev_date > c["_rev_date"]:
+            c["_rev_date"] = rev_date
+            c["revenue_eur_m"] = rev_eur_m
+
+    out = []
+    for c in by_domain.values():
+        c.pop("_rev_date", None)
+        if c["revenue_eur_m"] is None:
+            c.pop("revenue_eur_m", None)
+        out.append(c)
     return out
 
 def check_url(c):
