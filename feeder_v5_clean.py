@@ -88,6 +88,15 @@ INDUSTRIES = [
     "Q507443",   # pharmaceutical industry
     "Q953045",   # metalworking
     "Q7202108",  # plastics industry
+    # Aggiunte 2026-07-02 — verificate una per una via SPARQL (>=15 aziende con P856 sito web)
+    "Q1945600",  # mining industry
+    "Q2283886",  # pulp and paper industry
+    "Q474200",   # shipbuilding
+    "Q26897133", # printing industry
+    "Q13747706", # agricultural machinery industry
+    "Q13405640", # construction industry
+    "Q2986369",  # semiconductor industry
+    "Q1341478",  # heavy industry
 ]
 COUNTRY_STR  = ",".join(COUNTRIES.keys())
 INDUSTRY_STR = ",".join(f"wd:{i}" for i in INDUSTRIES)
