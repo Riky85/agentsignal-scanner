@@ -1,4 +1,4 @@
-import asyncio, aiohttp, psycopg2, os, time, traceback
+import asyncio, aiohttp, psycopg2, os, time, traceback, re
 
 PG_HOST = os.environ.get("PG_HOST", "postgres-db.railway.internal")
 PG_PORT = int(os.environ.get("PG_PORT", "5432"))
@@ -110,9 +110,15 @@ def run_cycle():
     for row, ok, final_url in results:
         domain, name, industry, size, founded, city, state, country_code = row
         if ok:
+            fallback_name = domain.split('.')[0].replace('-', ' ').title()
+            clean_len = len(re.sub(r'[^a-zA-Z0-9]', '', name or fallback_name))
+            if clean_len <= 1:
+                # Nome troppo corto/non informativo (es. dominio "a.pl" -> nome "a"): scarta, non e' un lead utile.
+                dead_domains.append(domain)
+                continue
             valid_domains.append(domain)
             emp = parse_size(size)
-            safe_name = (name or domain.split('.')[0].replace('-', ' ').title())[:250]
+            safe_name = (name or fallback_name)[:250]
             to_insert.append((
                 domain, safe_name, final_url or f"https://{domain}", country_code, city, industry, emp,
                 'bigpicture_opendata', 'pending', False, False
