@@ -193,7 +193,17 @@ LINKEDIN_RE = re.compile(r'https?://[a-z]{0,3}\.?linkedin\.com/company/[a-zA-Z0-
 EMAIL_JUNK = ("sentry.io","wixpress.com","example.com","godaddy.com","cloudflare.com","schema.org",
               "w3.org","google.com","googletagmanager.com","gstatic.com","facebook.com","twitter.com",
               "x.com","wordpress.com","gravatar.com","sentry-next.wixpress.com",".png",".jpg",".jpeg",
-              ".gif",".svg","yourdomain.com","domain.com")
+              ".gif",".svg",".webp",".ico",".avif",".woff",".woff2",".ttf",".eot",".svg",
+              "yourdomain.com","domain.com")
+EMAIL_ASSET_RE = re.compile(r'@\d+x\b', re.I)  # retina asset suffixes like name@2x.webp, not real emails
+def _is_valid_email(cand):
+    cand = cand.strip().strip(".,;:")
+    if any(j in cand.lower() for j in EMAIL_JUNK): return False
+    if EMAIL_ASSET_RE.search(cand): return False
+    domain_part = cand.split("@")[-1]
+    tld = domain_part.split(".")[-1] if "." in domain_part else ""
+    if not (2 <= len(tld) <= 10 and tld.isalpha()): return False
+    return True
 
 # ─────────────────────────── FETCH ───────────────────────────
 def fetch(url, timeout=6):
@@ -342,27 +352,34 @@ def extract_contact_info(pages, domain):
         raw = pages[pname]["raw"]
         m = re.findall(r'mailto:([^"\'>\s?]+)', raw, re.I)
         for cand in m:
-            cand = cand.strip()
-            if "@" in cand and not any(j in cand.lower() for j in EMAIL_JUNK):
-                email = cand; break
+            if "@" in cand and _is_valid_email(cand):
+                email = cand.strip(); break
         if not email:
             m = EMAIL_RE.findall(raw)
             for cand in m:
-                if not any(j in cand.lower() for j in EMAIL_JUNK):
-                    email = cand; break
+                if _is_valid_email(cand):
+                    email = cand.strip(); break
         if email: break
 
     for pname in priority:
         if pname not in pages: continue
         raw = pages[pname]["raw"]
+        # tel: links are the most reliable — sanity check digit count only
         m = re.findall(r'tel:([+\d\s().\-]+)', raw, re.I)
-        if m:
-            phone = m[0].strip(); break
-        m2 = PHONE_RE.findall(pages[pname]["text"])
-        if m2:
-            cand = m2[0].strip()
-            if len(re.sub(r'\D','',cand)) >= 8:
+        for cand in m:
+            digits = re.sub(r'\D','',cand)
+            if 7 <= len(digits) <= 15:
+                phone = cand.strip(); break
+        if phone: break
+        # fallback: plain text match, only accept if it LOOKS like a formatted phone
+        # (has a separator or leading +) — rejects raw digit blobs from tracking/IDs
+        for m2 in PHONE_RE.findall(pages[pname]["text"]):
+            cand = m2.strip()
+            digits = re.sub(r'\D','',cand)
+            has_separator = bool(re.search(r'[\s().\-]', cand)) or cand.startswith("+")
+            if has_separator and 7 <= len(digits) <= 15:
                 phone = cand; break
+        if phone: break
 
     for pname in ("home","about","contact"):
         if pname not in pages: continue
