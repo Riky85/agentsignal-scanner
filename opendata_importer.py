@@ -1,4 +1,4 @@
-import asyncio, aiohttp, psycopg2, os, time
+import asyncio, aiohttp, psycopg2, os, time, traceback
 
 PG_HOST = os.environ.get("PG_HOST", "postgres-db.railway.internal")
 PG_PORT = int(os.environ.get("PG_PORT", "5432"))
@@ -49,7 +49,6 @@ async def check_domain(session, domain):
             async with session.get(url, timeout=TIMEOUT, allow_redirects=True, ssl=False) as resp:
                 if resp.status < 500:
                     final_host = str(resp.url).split("//")[-1].split("/")[0].replace("www.", "")
-                    # Se dopo i redirect finisce su una piattaforma generica, non e' un sito aziendale valido
                     if final_host in PLATFORM_BLOCKLIST:
                         return False, None
                     return True, str(resp.url)
@@ -80,12 +79,84 @@ def recover_stuck():
     cur = conn.cursor()
     cur.execute("UPDATE opendata_staging SET status='pending' WHERE status='processing'")
     n = cur.rowcount
-    # Marca subito come morti i domini piattaforma, senza sprecare richieste HTTP
     cur.execute("UPDATE opendata_staging SET status='dead' WHERE status='pending' AND domain = ANY(%s)", (list(PLATFORM_BLOCKLIST),))
     n2 = cur.rowcount
     conn.commit()
     conn.close()
     print(f"Recovery: {n} righe 'processing' rimesse in pending, {n2} domini piattaforma marcati come morti.", flush=True)
+
+def run_cycle():
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT domain, name, industry, size, founded, city, state, country_code
+        FROM opendata_staging WHERE status='pending' LIMIT %s
+    """, (BATCH_SIZE,))
+    batch = cur.fetchall()
+    if not batch:
+        conn.close()
+        return None
+
+    domains = [r[0] for r in batch]
+    cur.execute("UPDATE opendata_staging SET status='processing' WHERE domain = ANY(%s)", (domains,))
+    conn.commit()
+    conn.close()
+
+    results = asyncio.run(process_batch(batch))
+
+    to_insert = []
+    valid_domains = []
+    dead_domains = []
+    for row, ok, final_url in results:
+        domain, name, industry, size, founded, city, state, country_code = row
+        if ok:
+            valid_domains.append(domain)
+            emp = parse_size(size)
+            safe_name = (name or domain.split('.')[0].replace('-', ' ').title())[:250]
+            to_insert.append((
+                domain, safe_name, final_url or f"https://{domain}", country_code, city, industry, emp,
+                'bigpicture_opendata', 'pending', False, False
+            ))
+        else:
+            dead_domains.append(domain)
+
+    conn = connect()
+    cur = conn.cursor()
+    try:
+        if to_insert:
+            execute_values(cur, """
+                INSERT INTO industrial_company
+                (domain, name, website_url, country, city, industry, employee_count, source, scan_status, scanned, dirty)
+                VALUES %s ON CONFLICT (domain) DO NOTHING
+            """, to_insert, page_size=200)
+        if valid_domains:
+            cur.execute("UPDATE opendata_staging SET status='imported' WHERE domain = ANY(%s)", (valid_domains,))
+        if dead_domains:
+            cur.execute("UPDATE opendata_staging SET status='dead' WHERE domain = ANY(%s)", (dead_domains,))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"ERRORE nel batch (rollback, verra' ritentato riga per riga): {e}", flush=True)
+        # Fallback: prova riga per riga cosi' una sola riga sporca non blocca l'intero batch
+        for row in to_insert:
+            try:
+                cur.execute("""
+                    INSERT INTO industrial_company
+                    (domain, name, website_url, country, city, industry, employee_count, source, scan_status, scanned, dirty)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (domain) DO NOTHING
+                """, row)
+                conn.commit()
+            except Exception as e2:
+                conn.rollback()
+                print(f"Riga scartata ({row[0]}): {e2}", flush=True)
+        if valid_domains:
+            cur.execute("UPDATE opendata_staging SET status='imported' WHERE domain = ANY(%s)", (valid_domains,))
+            conn.commit()
+        if dead_domains:
+            cur.execute("UPDATE opendata_staging SET status='dead' WHERE domain = ANY(%s)", (dead_domains,))
+            conn.commit()
+    conn.close()
+    return len(valid_domains), len(dead_domains)
 
 def main_loop():
     print("Opendata importer avviato.", flush=True)
@@ -94,58 +165,20 @@ def main_loop():
     total_dead = 0
     cycles = 0
     while True:
-        conn = connect()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT domain, name, industry, size, founded, city, state, country_code
-            FROM opendata_staging WHERE status='pending' LIMIT %s
-        """, (BATCH_SIZE,))
-        batch = cur.fetchall()
-        if not batch:
+        try:
+            r = run_cycle()
+        except Exception as e:
+            print(f"Errore imprevisto nel ciclo, continuo dopo 10s: {e}", flush=True)
+            traceback.print_exc()
+            time.sleep(10)
+            continue
+        if r is None:
             print("Coda staging esaurita. Sleep 5 min e ricontrollo.", flush=True)
-            conn.close()
             time.sleep(300)
             continue
-
-        domains = [r[0] for r in batch]
-        cur.execute("UPDATE opendata_staging SET status='processing' WHERE domain = ANY(%s)", (domains,))
-        conn.commit()
-        conn.close()
-
-        results = asyncio.run(process_batch(batch))
-
-        to_insert = []
-        valid_domains = []
-        dead_domains = []
-        for row, ok, final_url in results:
-            domain, name, industry, size, founded, city, state, country_code = row
-            if ok:
-                valid_domains.append(domain)
-                emp = parse_size(size)
-                to_insert.append((
-                    domain, name, final_url or f"https://{domain}", country_code, city, industry, emp,
-                    'bigpicture_opendata', 'pending', False, False
-                ))
-            else:
-                dead_domains.append(domain)
-
-        conn = connect()
-        cur = conn.cursor()
-        if to_insert:
-            execute_values(cur, """
-                INSERT INTO industrial_company
-                (domain, name, website_url, country, city, industry, employee_count, source, scan_status, scanned, dirty)
-                VALUES %s ON CONFLICT (domain) DO NOTHING
-            """, to_insert, page_size=500)
-        if valid_domains:
-            cur.execute("UPDATE opendata_staging SET status='imported' WHERE domain = ANY(%s)", (valid_domains,))
-        if dead_domains:
-            cur.execute("UPDATE opendata_staging SET status='dead' WHERE domain = ANY(%s)", (dead_domains,))
-        conn.commit()
-        conn.close()
-
-        total_imported += len(valid_domains)
-        total_dead += len(dead_domains)
+        imp, dead = r
+        total_imported += imp
+        total_dead += dead
         cycles += 1
         if cycles % 5 == 0:
             print(f"[ciclo {cycles}] Importate finora: {total_imported} | morte: {total_dead}", flush=True)
