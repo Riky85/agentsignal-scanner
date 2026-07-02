@@ -170,7 +170,14 @@ def main_loop():
     total_imported = 0
     total_dead = 0
     cycles = 0
+    start_time = time.time()
     while True:
+        # Railway killa il container periodicamente (probabile limite di memoria) dopo ~8-9 min.
+        # Meglio uscire noi puliti PRIMA di quel punto: il supervisore bash ci fa ripartire in 3s
+        # con memoria fresca, invece di subire un kill non controllato a metà batch.
+        if time.time() - start_time > 300 or cycles >= 100:
+            print(f"[ciclo {cycles}] Restart preventivo pulito dopo {int(time.time()-start_time)}s per liberare memoria.", flush=True)
+            return
         try:
             r = run_cycle()
         except Exception as e:
