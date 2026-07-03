@@ -517,7 +517,7 @@ def build_why_now_tags(opps, intent_hits, jobs, threshold, max_tags=6):
         if any(k in growth_pool for k in kws) and tag not in tags:
             tags.append(tag)
     for j in jobs:
-        t = JOB_TAG_MAP.get(j["title"].lower(), f"Hiring {j['title']}")
+        t = j["title"] if j["title"] == "Active Hiring" else JOB_TAG_MAP.get(j["title"].lower(), f"Hiring {j['title']}")
         if t not in tags:
             tags.append(t)
     if opps.get("vision", {}).get("score", 0) >= threshold and "Quality Automation" not in tags:
