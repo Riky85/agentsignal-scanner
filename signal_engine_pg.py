@@ -161,15 +161,46 @@ MAINT_KW = ["maintenance technician","downtime","preventive maintenance","predic
 MAINT_SOLUTIONS = {"default":"Predictive maintenance program","monitoring":"Maintenance monitoring platform",
                    "sensors":"Industrial IoT sensors"}
 
+# ─── Phase 2 expansion: PLC (split out from MES/SCADA), WMS, ERP-as-buying-signal, CMMS, IoT/IIoT ───
+PLC_KW = ["plc programming","plc programmer","ladder logic","structured text","siemens s7","tia portal",
+          "allen-bradley plc","beckhoff twincat","codesys","plc retrofit","plc upgrade","control panel design",
+          "electrical control panel","plc integration","function block diagram","step 7","rslogix"]
+PLC_SOLUTIONS = {"default":"PLC/HMI retrofit","retrofit":"Control panel retrofit","panel":"Electrical panel design"}
+
+WMS_KW = ["warehouse management system","wms implementation","wms integration","wms rollout",
+          "inventory management system","pick to light","put to light","voice picking","warehouse software",
+          "slotting optimization","yard management system","order fulfillment software"]
+WMS_SOLUTIONS = {"default":"WMS implementation","inventory":"Inventory management system","picking":"Pick-to-light system"}
+
+ERP_KW = ["erp implementation","erp migration","erp upgrade","erp rollout","erp go-live","erp consultant",
+          "sap implementation","sap consultant","sap migration","sap rollout","dynamics 365 implementation",
+          "netsuite implementation","odoo implementation","erp integration project"]
+ERP_SOLUTIONS = {"default":"ERP implementation/integration","sap":"SAP implementation","migration":"ERP migration"}
+
+CMMS_KW = ["cmms","computerized maintenance management","maintenance management software",
+           "maintenance scheduling software","asset management software","fiix cmms","upkeep cmms",
+           "maintainx","hippo cmms","emaint","work order management system"]
+CMMS_SOLUTIONS = {"default":"CMMS deployment","scheduling":"Maintenance scheduling platform","asset":"Asset management system"}
+
+IOT_KW = ["industrial iot","iiot platform","iot sensors","connected factory","edge computing",
+          "predictive analytics platform","digital twin","condition-based monitoring","remote monitoring platform",
+          "sensor network","real-time data platform","industry 4.0 platform"]
+IOT_SOLUTIONS = {"default":"Industrial IoT / IIoT platform","twin":"Digital twin deployment","edge":"Edge computing rollout"}
+
 OPP_CATEGORIES = {
     "robotics":  {"kw":ROBOTICS_KW, "field":"robotics_opportunity_score", "cat":"robotics", "sol":ROBOTICS_SOLUTIONS, "weight":12},
     "amr_agv":   {"kw":AMR_AGV_KW,  "field":"amr_agv_opportunity_score", "cat":"amr_agv", "sol":AMR_SOLUTIONS, "weight":12},
     "mes_scada": {"kw":MES_KW,      "field":"mes_opportunity_score", "cat":"mes_scada", "sol":MES_SOLUTIONS, "weight":8},
     "vision":    {"kw":VISION_KW,   "field":"machine_vision_opportunity_score", "cat":"machine_vision", "sol":VISION_SOLUTIONS, "weight":12},
     "maintenance":{"kw":MAINT_KW,   "field":"maintenance_opportunity_score", "cat":"maintenance", "sol":MAINT_SOLUTIONS, "weight":12},
+    "plc":       {"kw":PLC_KW,      "field":"plc_opportunity_score", "cat":"plc", "sol":PLC_SOLUTIONS, "weight":10},
+    "wms":       {"kw":WMS_KW,      "field":"wms_opportunity_score", "cat":"wms", "sol":WMS_SOLUTIONS, "weight":10},
+    "erp_signal":{"kw":ERP_KW,      "field":"erp_opportunity_score", "cat":"erp_signal", "sol":ERP_SOLUTIONS, "weight":10},
+    "cmms":      {"kw":CMMS_KW,     "field":"cmms_opportunity_score", "cat":"cmms", "sol":CMMS_SOLUTIONS, "weight":10},
+    "iot_iiot":  {"kw":IOT_KW,      "field":"iot_opportunity_score", "cat":"iot_iiot", "sol":IOT_SOLUTIONS, "weight":10},
 }
 # Display order for solution tags (matches the UI convention used before)
-SOLUTION_ORDER = ["amr_agv", "mes_scada", "vision", "robotics", "maintenance"]
+SOLUTION_ORDER = ["amr_agv", "mes_scada", "plc", "vision", "robotics", "maintenance", "wms", "erp_signal", "cmms", "iot_iiot"]
 
 # note: "hiring"/"careers"/"join our team" deliberately excluded — standard links on almost every
 # corporate site, they diluted buying intent with noise. Specific hiring is tracked via detect_jobs().
@@ -279,7 +310,8 @@ JOB_TAG_MAP = {
 }
 
 TOP_LABELS = {"robotics":"Robotics & Cobot","amr_agv":"AMR / AGV","mes_scada":"MES/SCADA/OEE",
-              "vision":"Machine Vision","maintenance":"Predictive Maintenance"}
+              "vision":"Machine Vision","maintenance":"Predictive Maintenance","plc":"PLC / Controls",
+              "wms":"WMS","erp_signal":"ERP","cmms":"CMMS","iot_iiot":"IoT / IIoT"}
 
 BLACKLIST = re.compile(
     r'\b(law firm|legal services|avvocato|anwaltskanzlei|real estate agent|immobilienmakler|'
@@ -472,9 +504,15 @@ def compute_buying_intent(pages, page_urls, base_url):
     return min(100, len(hits) * 10), hits[:8], hit_urls
 
 def compute_fit_score(employee_count, industry_cat, opp_scores):
-    emp_fit = 60
-    if employee_count and employee_count > 20: emp_fit = 80
-    if employee_count and employee_count > 200: emp_fit = 95
+    # TAM focus (2026-07-03): companies in the 50-5,000 employee range are the priority
+    # segment (real budget, still reachable) -- score them highest, without hard-excluding
+    # anyone outside that range (unknown/small/huge companies still get scanned and scored).
+    emp_fit = 55  # unknown employee_count
+    if employee_count:
+        if 50 <= employee_count <= 5000: emp_fit = 95
+        elif employee_count > 5000: emp_fit = 75
+        elif employee_count >= 20: emp_fit = 70
+        else: emp_fit = 50
     industry_fit = 90 if industry_cat != "Other" else 50
     signal_fit = min(100, max(opp_scores.values(), default=0))
     return round(emp_fit*0.3 + industry_fit*0.3 + signal_fit*0.4)
@@ -595,10 +633,12 @@ def build_why_now_tags(opps, intent_hits, jobs, threshold, pages=None, max_tags=
     # already detected (e.g. hiring "robotics engineer" AND robotics signals found on-site)
     # is a much stronger, correlated buying signal than either alone -> surface it explicitly.
     hiring_titles = " ".join(j["title"].lower() for j in jobs)
-    role_to_opp = {"robotics": "robotics", "plc": "mes_scada", "automation": "mes_scada",
-                   "controls": "mes_scada", "mes": "mes_scada", "scada": "mes_scada",
-                   "maintenance": "maintenance", "quality": "vision", "iot": "mes_scada",
-                   "digitalization": "mes_scada", "industry 4.0": "mes_scada"}
+    role_to_opp = {"robotics": "robotics", "plc": "plc", "automation": "mes_scada",
+                   "controls": "plc", "controls programmer": "plc", "mes": "mes_scada", "scada": "mes_scada",
+                   "maintenance": "maintenance", "reliability": "cmms", "quality": "vision",
+                   "iot": "iot_iiot", "iot solutions architect": "iot_iiot",
+                   "digitalization": "mes_scada", "industry 4.0": "mes_scada",
+                   "sap": "erp_signal", "erp": "erp_signal", "wms": "wms", "warehouse systems": "wms"}
     for role_kw, opp_key in role_to_opp.items():
         if role_kw in hiring_titles and opps.get(opp_key, {}).get("score", 0) >= threshold:
             if "Hiring Matches Tech Need" not in tags:
@@ -687,6 +727,8 @@ def process_company(rec, conn):
             UPDATE industrial_company SET
                 automation_readiness_score=%s, robotics_opportunity_score=%s, amr_agv_opportunity_score=%s,
                 mes_opportunity_score=%s, machine_vision_opportunity_score=%s, maintenance_opportunity_score=%s,
+                plc_opportunity_score=%s, wms_opportunity_score=%s, erp_opportunity_score=%s,
+                cmms_opportunity_score=%s, iot_opportunity_score=%s,
                 buying_intent_score=%s, fit_score=%s, confidence_score=%s, industry_category=%s,
                 estimated_deal_value_min=%s, estimated_deal_value_max=%s,
                 scan_status='completed', scanned=TRUE, last_scan_date=%s,
@@ -698,7 +740,10 @@ def process_company(rec, conn):
             max(opp_scores_only.get("robotics",0), opp_scores_only.get("mes_scada",0)),
             opp_scores_only.get("robotics",0), opp_scores_only.get("amr_agv",0),
             opp_scores_only.get("mes_scada",0), opp_scores_only.get("vision",0),
-            opp_scores_only.get("maintenance",0), buying_intent, fit_score, confidence,
+            opp_scores_only.get("maintenance",0),
+            opp_scores_only.get("plc",0), opp_scores_only.get("wms",0), opp_scores_only.get("erp_signal",0),
+            opp_scores_only.get("cmms",0), opp_scores_only.get("iot_iiot",0),
+            buying_intent, fit_score, confidence,
             industry_cat, dmin, dmax, now, top_label, solution_tags, why_now_tags,
             email, phone, linkedin_url, cid
         ))
@@ -740,18 +785,33 @@ def process_company(rec, conn):
                 cid, domain, j["title"], j["snippet"], j["url"], j["keywords"], now))
             n_jobs += 1
 
+        # CASCADE (2026-07-03 expansion): write ONE opportunity row per qualifying category,
+        # not just the single "top" one -- a company hiring a PLC engineer + expanding the plant
+        # can genuinely need PLC retrofit AND MES AND a robot cell at the same time. Each row keeps
+        # its own category-specific score/deal-range so each is independently actionable in the UI,
+        # while `signals_count`/`top_signals` still summarize the full picture on every row.
         n_opp = 0
-        if top_score >= SIGNAL_THRESHOLD:
+        # Same safeguard as solution tags: require >=2 distinct evidence keywords, not just
+        # score>=threshold, otherwise a single ambiguous keyword hit (weight 10-12 categories
+        # clear the threshold in one match) would spam noisy single-signal opportunities --
+        # exactly the false-positive class fixed for top_opportunity earlier today.
+        qualifying = [k for k, v in opps.items()
+                      if v["score"] >= SIGNAL_THRESHOLD and len(v["evidence"]) >= MIN_EVIDENCE_FOR_SOLUTION]
+        signals_count_total = len(qualifying)
+        top_signals_list = [f"{opps[k]['cat']}:{opps[k]['score']}" for k in qualifying][:5]
+        for key in qualifying:
+            v = opps[key]
+            opp_dmin, opp_dmax = deal_range(emp, v["score"])
             cur.execute("""INSERT INTO industrial_opportunity
                 (company_id, company_name, company_domain, opportunity_type, recommended_solution,
                  opportunity_score, buying_intent_score, estimated_deal_value_min, estimated_deal_value_max,
                  reason_summary, signals_count, top_signals)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (
-                cid, rec.get("name",""), domain, top_label, solution_tags or opps[top_key]["solution"],
-                fit_score, buying_intent, dmin, dmax, reason_summary,
-                sum(1 for v in opps.values() if v["score"] >= SIGNAL_THRESHOLD),
-                [f"{v['cat']}:{v['score']}" for v in opps.values() if v["score"] >= SIGNAL_THRESHOLD][:5]))
-            n_opp = 1
+                cid, rec.get("name",""), domain, TOP_LABELS.get(key, key), v["solution"],
+                v["score"], buying_intent, opp_dmin, opp_dmax,
+                f"{v['cat']}: {', '.join(v['evidence'][:3])}" if v["evidence"] else reason_summary,
+                signals_count_total, top_signals_list))
+            n_opp += 1
         conn.commit()
 
         with lock:
@@ -943,7 +1003,8 @@ def load_pending(conn, limit=200):
     cur.execute("""
         SELECT id, name, domain, website_url, employee_count, country, scan_status
         FROM industrial_company WHERE scan_status='pending'
-        ORDER BY (country = ANY(%s)) DESC, id ASC
+        ORDER BY (employee_count IS NOT NULL AND employee_count BETWEEN 50 AND 5000) DESC,
+                 (country = ANY(%s)) DESC, id ASC
         LIMIT %s
     """, (list(PRIORITY), limit))
     rows = cur.fetchall()
