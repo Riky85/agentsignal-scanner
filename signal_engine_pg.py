@@ -47,10 +47,28 @@ class H(BaseHTTPRequestHandler):
         b = json.dumps(stats, default=str).encode()
         self.send_response(200); self.send_header("Content-Type","application/json")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_POST(self):
+        if self.path != "/scan-now":
+            self.send_response(404); self.end_headers(); return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            result = scan_now(
+                (payload.get("name") or "").strip(),
+                (payload.get("website") or "").strip(),
+                (payload.get("industry") or "").strip(),
+                (payload.get("country") or "").strip(),
+            )
+            status = 200 if "error" not in result else 400
+        except Exception as e:
+            result, status = {"error": str(e)}, 500
+        b = json.dumps(result, default=str).encode()
+        self.send_response(status); self.send_header("Content-Type","application/json")
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
 
 threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), H).serve_forever(), daemon=True).start()
-log.info(f"[OK] healthcheck :{PORT} | workers={WORKERS} | threshold={SIGNAL_THRESHOLD} | Postgres-only")
+log.info(f"[OK] healthcheck+scan-now :{PORT} | workers={WORKERS} | threshold={SIGNAL_THRESHOLD} | Postgres-only")
 
 # ─────────────────────────── INDUSTRY CLASSIFICATION ───────────────────────────
 INDUSTRY_KW = {
@@ -717,6 +735,73 @@ def process_company(rec, conn):
         log.warning(f"  ERR {domain}: {str(e)[:150]}")
     finally:
         cur.close()
+
+# ─────────────────────────── ON-DEMAND SCAN (manual "Add Company") ───────────────────────────
+PLATFORM_BLOCKLIST_SCAN = ["facebook.com","google.com","linkedin.com","instagram.com","amazon.com",
+    "shopify.com","twitter.com","x.com","youtube.com","wikipedia.org"]
+
+def scan_now(name, website, industry_hint="", country_hint=""):
+    """Runs the SAME real detection pipeline used by the background scanner, synchronously,
+    for a single manually-submitted company. Live HTTP validation happens first (same rule as
+    bulk import). Upserts into the master Postgres table (dedup by domain) and returns the
+    fully enriched result so the caller (e.g. the app's 'Add Company' button) can display it
+    immediately instead of waiting for the next batch sync."""
+    if not name or not website:
+        return {"error": "name and website are required"}
+    if not website.startswith("http"):
+        website = "https://" + website
+    try:
+        host = website.split("//")[-1].split("/")[0].lower()
+    except Exception:
+        return {"error": "invalid website URL"}
+    domain = host[4:] if host.startswith("www.") else host
+    if any(b in domain for b in PLATFORM_BLOCKLIST_SCAN):
+        return {"error": "social/platform URLs are not accepted, please provide the company's own website"}
+
+    # Live HTTP validation BEFORE any insert (same standing rule as the bulk importer)
+    try:
+        r = requests.get(website, headers=UA, timeout=10, allow_redirects=True)
+        if r.status_code >= 400:
+            return {"error": f"website not reachable (HTTP {r.status_code})"}
+    except Exception as e:
+        return {"error": f"website not reachable: {str(e)[:150]}"}
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM industrial_company WHERE domain=%s", (domain,))
+        existing = cur.fetchone()
+        if existing:
+            cid = existing["id"]
+            cur.execute("""UPDATE industrial_company SET name=%s, website_url=%s,
+                            industry=COALESCE(NULLIF(%s,''), industry), country=COALESCE(NULLIF(%s,''), country),
+                            scan_status='processing', updated_at=now() WHERE id=%s""",
+                        (name, website, industry_hint, country_hint, cid))
+        else:
+            cur.execute("""INSERT INTO industrial_company
+                (name, domain, website_url, industry, country, source, scan_status, scanned, dirty, created_at, updated_at)
+                VALUES (%s,%s,%s,%s,%s,'manual_add','processing',FALSE,TRUE, now(), now())
+                RETURNING id""",
+                (name, domain, website, industry_hint or None, country_hint or None))
+            cid = cur.fetchone()["id"]
+        conn.commit()
+    finally:
+        cur.close()
+
+    rec = {"id": cid, "name": name, "domain": domain, "website_url": website, "employee_count": None}
+    process_company(rec, conn)  # runs the exact same detection + signal/tech/opportunity inserts as the background scanner
+
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT * FROM industrial_company WHERE id=%s", (cid,))
+        company = dict(cur.fetchone())
+        cur.execute("""SELECT signal_category, signal_type, evidence_text, source_url, confidence_score
+                       FROM industrial_signal WHERE company_id=%s ORDER BY detected_at DESC LIMIT 20""", (cid,))
+        signals = [dict(r) for r in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+    return {"company": company, "signals": signals}
 
 def _norm_name(n):
     import unicodedata
