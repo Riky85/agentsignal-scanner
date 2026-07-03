@@ -42,6 +42,31 @@ stats = {"scanned":0,"unreachable":0,"errors":0,"cycle":0,"good":0,
          "queue":0,"last_qc":"never","qc":{},"status":"starting"}
 lock = threading.Lock()
 
+# ─────────────────────────── SELF-WATCHDOG ───────────────────────────
+# Root cause of past silent hangs varies (DB lock pileups, HTTP requests that never
+# time out on certain hosts, etc). Rather than chase every possible cause, this
+# watchdog forces a hard process exit if NO company has finished processing for
+# WATCHDOG_TIMEOUT seconds. The bash supervisor loop around this script (see
+# Dockerfile/railway startCommand: "while true; do python3 signal_engine_pg.py; ...")
+# immediately relaunches it, so the engine self-heals within minutes instead of
+# hanging silently for hours.
+_last_progress = {"t": time.time()}
+WATCHDOG_TIMEOUT = int(os.environ.get("WATCHDOG_TIMEOUT", 240))  # 4 minutes
+
+def _touch_progress():
+    with lock:
+        _last_progress["t"] = time.time()
+
+def _watchdog_loop():
+    while True:
+        time.sleep(20)
+        stalled_for = time.time() - _last_progress["t"]
+        if stalled_for > WATCHDOG_TIMEOUT:
+            log.error(f"WATCHDOG: no progress for {stalled_for:.0f}s (limit {WATCHDOG_TIMEOUT}s) — forcing hard restart")
+            os._exit(1)
+
+threading.Thread(target=_watchdog_loop, daemon=True).start()
+
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         b = json.dumps(stats, default=str).encode()
@@ -599,6 +624,7 @@ def process_company(rec, conn):
                             last_scan_date=%s, dirty=TRUE, updated_at=now() WHERE id=%s""", (now, cid))
             conn.commit()
             with lock: stats["unreachable"] += 1
+            _touch_progress()
             return
 
         # Domain squatted/parked/redirected to an unrelated business (e.g. expired domain
@@ -617,6 +643,7 @@ def process_company(rec, conn):
                             last_scan_date=%s, dirty=TRUE, updated_at=now() WHERE id=%s""", (now, cid))
             conn.commit()
             with lock: stats["unreachable"] += 1
+            _touch_progress()
             return
 
         industry_cat = classify_industry(all_text)
@@ -737,10 +764,12 @@ def process_company(rec, conn):
         log.info(f"  OK {name:38} {industry_cat[:18]:18} fit={fit_score:3d} bi={buying_intent:3d} "
                  f"sol=[{solution_tags[:40]:40}] why=[{why_now_tags[:40]:40}] "
                  f"sig={n_sig} tech={n_tech} jobs={n_jobs} opp={n_opp} email={'Y' if email else 'N'} phone={'Y' if phone else 'N'}")
+        _touch_progress()
     except Exception as e:
         conn.rollback()
         with lock: stats["errors"] += 1
         log.warning(f"  ERR {domain}: {str(e)[:150]}")
+        _touch_progress()
     finally:
         cur.close()
 
