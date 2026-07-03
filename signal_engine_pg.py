@@ -631,8 +631,16 @@ def process_company(rec, conn):
         fit_score = compute_fit_score(emp, industry_cat, opp_scores_only)
         top_key = max(opp_scores_only, key=opp_scores_only.get)
         top_score = opp_scores_only[top_key]
-        top_label = TOP_LABELS.get(top_key, top_key)
-        dmin, dmax = deal_range(emp, top_score)
+        # BUG FIX (2026-07-03): max() on an all-zero dict just returns the first key
+        # ("robotics") regardless of any real evidence, mislabeling every zero-signal
+        # company as "Robotics & Cobot". Only assign a top_opportunity label/deal range
+        # when the winning category actually cleared the signal threshold.
+        if top_score >= SIGNAL_THRESHOLD:
+            top_label = TOP_LABELS.get(top_key, top_key)
+            dmin, dmax = deal_range(emp, top_score)
+        else:
+            top_label = None
+            dmin, dmax = None, None
         total_evidence = sum(len(v["evidence"]) for v in opps.values()) + len(intent_hits)
         confidence = compute_confidence(len(pages), total_evidence)
 
