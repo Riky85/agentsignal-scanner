@@ -47,11 +47,16 @@ async def check_domain(session, domain):
         url = f"{scheme}{domain}"
         try:
             async with session.get(url, timeout=TIMEOUT, allow_redirects=True, ssl=False) as resp:
-                if resp.status < 500:
-                    final_host = str(resp.url).split("//")[-1].split("/")[0].replace("www.", "")
+                # Solo 2xx/3xx sono "vivo". <500 accettava anche 404/410/403 (siti morti o bloccati)
+                # e URL finale che termina in una pagina di errore comune (404.html, not-found, ecc.)
+                final_url_str = str(resp.url)
+                final_path = final_url_str.split("//")[-1].split("/", 1)[1].lower() if "/" in final_url_str.split("//")[-1] else ""
+                looks_like_error_page = any(p in final_path for p in ("404", "not-found", "notfound", "error", "page-not-found"))
+                if 200 <= resp.status < 400 and not looks_like_error_page:
+                    final_host = final_url_str.split("//")[-1].split("/")[0].replace("www.", "")
                     if final_host in PLATFORM_BLOCKLIST:
                         return False, None
-                    return True, str(resp.url)
+                    return True, final_url_str
         except Exception:
             continue
     return False, None
@@ -111,9 +116,12 @@ def run_cycle():
         domain, name, industry, size, founded, city, state, country_code = row
         if ok:
             fallback_name = domain.split('.')[0].replace('-', ' ').title()
-            clean_len = len(re.sub(r'[^a-zA-Z0-9]', '', name or fallback_name))
-            if clean_len <= 1:
-                # Nome troppo corto/non informativo (es. dominio "a.pl" -> nome "a"): scarta, non e' un lead utile.
+            candidate_name = name or fallback_name
+            clean_len = len(re.sub(r'[^a-zA-Z0-9]', '', candidate_name))
+            JUNK_NAMES = {"xx", "x", "na", "n a", "nd", "tbd", "unknown", "_", "-", "none", "null", "test"}
+            is_junk = clean_len <= 2 or candidate_name.strip().lower() in JUNK_NAMES
+            if is_junk:
+                # Nome troppo corto/placeholder (es. "xx", "_", "A"): scarta, non e' un lead utile.
                 dead_domains.append(domain)
                 continue
             valid_domains.append(domain)
