@@ -528,25 +528,6 @@ def build_solution_tags(opps, threshold):
             tags.append(OPP_CATEGORIES[key]["sol"]["default"])
     return ", ".join(tags)
 
-# ─────────────────────────── REVENUE ESTIMATE (bridge until real data source found) ───────────────────────────
-# NOT real financial data -- a rough revenue-per-employee heuristic by industry category,
-# used only to give sales a usable order-of-magnitude filter until a real revenue source
-# (beyond Wikidata P2139, which covers <0.1% of records) is integrated.
-REVENUE_PER_EMPLOYEE_EUR_M = {
-    "Industrial Components": 0.15, "Furniture": 0.12, "Energy": 0.5, "Metalworking": 0.15,
-    "Electronics": 0.25, "Automotive": 0.2, "Logistics": 0.13, "Food & Beverage": 0.2,
-    "Packaging": 0.18, "Water & Utilities": 0.4, "Plastics": 0.15, "Medical Devices": 0.3,
-    "Chemicals": 0.35, "Aerospace": 0.35, "Aerospace & Defense": 0.35, "Construction Materials": 0.18,
-    "Pharma": 0.5, "Machinery": 0.18, "Steel & Metals": 0.25, "Textile": 0.1, "Glass & Ceramics": 0.2,
-}
-REVENUE_PER_EMPLOYEE_DEFAULT = 0.18
-
-def estimate_revenue_eur_m(employee_count, industry_cat):
-    if not employee_count or employee_count <= 0:
-        return None
-    factor = REVENUE_PER_EMPLOYEE_EUR_M.get(industry_cat, REVENUE_PER_EMPLOYEE_DEFAULT)
-    return round(employee_count * factor, 1)
-
 CURRENT_YEAR = 2026
 YEAR_RE = re.compile(r"\b(20[0-2][0-9])\b")
 
@@ -646,7 +627,6 @@ def process_company(rec, conn):
         email, phone, linkedin_url = extract_contact_info(pages, domain)
 
         emp = int(float(rec.get("employee_count") or 0)) or None
-        revenue_estimate = estimate_revenue_eur_m(emp, industry_cat)
         opp_scores_only = {k: v["score"] for k,v in opps.items()}
         fit_score = compute_fit_score(emp, industry_cat, opp_scores_only)
         top_key = max(opp_scores_only, key=opp_scores_only.get)
@@ -685,7 +665,6 @@ def process_company(rec, conn):
                 scan_status='completed', scanned=TRUE, last_scan_date=%s,
                 top_opportunity=%s, recommended_solution=%s, pipeline_notes=%s,
                 email=%s, phone=%s, linkedin_url=%s,
-                revenue_estimate_eur_m=COALESCE(%s, revenue_estimate_eur_m),
                 dirty=TRUE, updated_at=now()
             WHERE id=%s
         """, (
@@ -694,7 +673,7 @@ def process_company(rec, conn):
             opp_scores_only.get("mes_scada",0), opp_scores_only.get("vision",0),
             opp_scores_only.get("maintenance",0), buying_intent, fit_score, confidence,
             industry_cat, dmin, dmax, now, top_label, solution_tags, why_now_tags,
-            email, phone, linkedin_url, revenue_estimate, cid
+            email, phone, linkedin_url, cid
         ))
         conn.commit()
 
