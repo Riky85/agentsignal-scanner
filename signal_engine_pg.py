@@ -137,36 +137,57 @@ INTENT_KW = ["new manufacturing plant","new production facility","greenfield pla
              "digital transformation","industry 4.0 implementation","lean transformation",
              "manufacturing modernization","machine retrofit","equipment upgrade","production line upgrade",
              "acquisition","new plant","new machinery","sustainability investment","operational efficiency",
+             # more natural phrasing real corporate sites actually use (less formal/press-release-y)
+             "we are expanding","we're expanding","expanding our production","expanding our facility",
+             "expanding our team","growing rapidly","rapid growth","state-of-the-art facility",
+             "state of the art facility","newly built facility","newly opened facility","recently opened",
+             "grand opening","new headquarters","relocating to a new","moved to a new facility",
+             "million investment","million euro investment","multi-million investment","investing heavily",
+             "significant investment","doubling capacity","doubling production","tripling capacity",
+             "scaling up production","ramping up production","increased output","expansion project",
+             "opens new facility","opened a new facility","invests in new","recently acquired","merger",
              # German (DE/AT/CH sites are very often local-language only)
              "neue produktionslinie","kapazitätserweiterung","werkserweiterung","neues werk","investition in automatisierung",
              "digitalisierung","industrie 4.0","neubau produktion","standorterweiterung","modernisierung der produktion",
+             "wir expandieren","wir bauen aus","erweitern unsere produktion","neue niederlassung","übernahme",
              # Italian (IT sites)
              "nuovo stabilimento","ampliamento produttivo","nuova linea di produzione","investimento in automazione",
              "digitalizzazione","industria 4.0","ampliamento capacità produttiva","nuovo impianto",
+             "stiamo espandendo","espansione della produzione","nuova sede","acquisizione recente",
              # French (FR/BE/CH sites)
              "nouvelle ligne de production","extension de capacité","nouvelle usine","investissement automatisation",
-             "transformation digitale","industrie 4.0","modernisation de la production"]
+             "transformation digitale","industrie 4.0","modernisation de la production",
+             "nous investissons","nouvelle usine ouverte","nouveau siège"]
 
 # Growth/expansion signals -> short "Why Now" tags (title case, 2-3 words, English)
 GROWTH_TAG_MAP = [
     (["new production facility","new manufacturing plant","greenfield plant","new factory opening","new plant",
-      "neues werk","neubau produktion","nuovo stabilimento","nuovo impianto","nouvelle usine"], "New Facility"),
+      "neues werk","neubau produktion","nuovo stabilimento","nuovo impianto","nouvelle usine",
+      "state-of-the-art facility","state of the art facility","newly built facility","newly opened facility",
+      "recently opened","grand opening","opens new facility","opened a new facility","neue niederlassung",
+      "nuova sede"], "New Facility"),
     (["new assembly line","new production line","neue produktionslinie","nuova linea di produzione",
       "nouvelle ligne de production"], "New Production Line"),
     (["capacity expansion","production capacity increase","plant expansion","brownfield expansion",
       "kapazitätserweiterung","werkserweiterung","standorterweiterung","ampliamento produttivo",
-      "ampliamento capacità produttiva","extension de capacité"], "Plant Expansion"),
+      "ampliamento capacità produttiva","extension de capacité","we are expanding","we're expanding",
+      "expanding our production","expanding our facility","growing rapidly","rapid growth",
+      "doubling capacity","doubling production","tripling capacity","scaling up production",
+      "ramping up production","increased output","expansion project","wir expandieren","wir bauen aus",
+      "erweitern unsere produktion","stiamo espandendo","espansione della produzione","nous investissons"], "Plant Expansion"),
     (["warehouse expansion","warehouse automation"], "Warehouse Expansion"),
     (["digital transformation","industry 4.0 implementation","smart factory","digitalisierung","industrie 4.0",
       "digitalizzazione","industria 4.0","transformation digitale"], "Digital Transformation"),
     (["automation investment","equipment investment","machinery investment","technology investment",
       "capital expenditure","capex investment","investition in automatisierung","investimento in automazione",
-      "investissement automatisation"], "Automation Investment"),
-    (["acquisition"], "Recent Acquisition"),
+      "investissement automatisation","million investment","million euro investment","multi-million investment",
+      "investing heavily","significant investment"], "Automation Investment"),
+    (["acquisition","recently acquired","merger","übernahme","acquisizione recente"], "Recent Acquisition"),
     (["machine retrofit","equipment upgrade","production line upgrade","modernisierung der produktion"], "Equipment Upgrade"),
     (["sustainability investment"], "Sustainability Investment"),
     (["lean transformation","manufacturing modernization"], "Manufacturing Modernization"),
-    (["new machinery"], "New Machinery"),
+    (["new machinery","invests in new"], "New Machinery"),
+    (["new headquarters","relocating to a new","moved to a new facility","nouveau siège"], "Relocation/HQ Move"),
 ]
 
 # ─────────────────────────── TECHNOLOGY VENDORS ───────────────────────────
@@ -191,7 +212,11 @@ JOB_TITLES = ["automation engineer","plc programmer","robotics engineer","manufa
               "cnc operator","warehouse operator","logistics manager","quality control technician",
               "mes specialist","scada engineer","controls engineer","plant manager","operations manager",
               "automation technician","controls technician","robotics technician","iot engineer",
-              "digitalization manager","industry 4.0 manager","lean manufacturing engineer","continuous improvement engineer"]
+              "digitalization manager","industry 4.0 manager","lean manufacturing engineer","continuous improvement engineer",
+              # broader roles that appear far more often on real careers pages than the specialist titles above
+              "machine operator","cnc machinist","assembly line worker","forklift operator","warehouse associate",
+              "welder","field service technician","supply chain manager","procurement manager","shift supervisor",
+              "quality engineer","supply chain planner","production supervisor","maintenance engineer","project engineer"]
 
 # Short "Hiring X" why-now tags per job title
 JOB_TAG_MAP = {
@@ -362,6 +387,13 @@ def detect_technologies(pages, page_urls, base_url):
                     break
     return found
 
+GENERIC_HIRING_MARKERS = ["open position","open positions","current openings","current opening",
+    "job opening","job openings","vacancy","vacancies","we are hiring","we're hiring","join our team",
+    "join our growing team","apply now","apply today","view all jobs","browse jobs","open roles","current vacancies",
+    # DE/IT/FR equivalents so non-English careers pages are not silently ignored
+    "offene stellen","wir stellen ein","jobangebote","posizioni aperte","stiamo assumendo","offerte di lavoro",
+    "postes ouverts","nous recrutons","offres d'emploi"]
+
 def detect_jobs(pages, page_urls, base_url):
     found = []
     careers_url = page_urls.get("careers", f"{base_url}/careers")
@@ -378,6 +410,12 @@ def detect_jobs(pages, page_urls, base_url):
             kws = [k for k in INTENT_KW if k in snippet] + [title]
             found.append({"title": title.title(), "snippet": snippet[:400],
                           "keywords": list(set(kws)), "url": careers_url})
+    # Fallback: no specific title matched, but the careers page clearly has real, current
+    # hiring content (not just a bare nav link) -> weaker but still real "Active Hiring" signal.
+    if not found and len(careers_text.strip()) > 400:
+        if any(m in careers_text for m in GENERIC_HIRING_MARKERS):
+            found.append({"title": "Active Hiring", "snippet": careers_text[:400],
+                          "keywords": [], "url": careers_url})
     return found[:10]
 
 def compute_buying_intent(pages, page_urls, base_url):
