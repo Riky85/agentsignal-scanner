@@ -254,7 +254,7 @@ def make_session():
 
 def fetch(url, session=None, timeout=6):
     """Returns {'text': cleaned lowercase text for keyword matching, 'raw': html with tags kept
-    (minus script/style) for extracting hrefs like mailto:/tel:/linkedin links)."""
+    (minus script/style) for extracting hrefs like mailto:/tel:/linkedin links), 'final_url': resolved URL after redirects."""
     try:
         req = session or requests
         r = req.get(url, timeout=timeout, verify=False, allow_redirects=True,
@@ -265,10 +265,27 @@ def fetch(url, session=None, timeout=6):
             raw_clean = re.sub(r'<style[^>]*>.*?</style>', '', raw_clean, flags=re.S)
             text = re.sub(r'<[^>]+>', ' ', raw_clean)
             text = re.sub(r'\s+', ' ', text).lower()[:15000]
-            return {"text": text, "raw": raw_clean[:40000]}
+            return {"text": text, "raw": raw_clean[:40000], "final_url": r.url}
     except Exception:
         pass
-    return {"text": "", "raw": ""}
+    return {"text": "", "raw": "", "final_url": ""}
+
+def _root_domain(host):
+    host = (host or "").lower().replace("www.", "").split(":")[0]
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+def domain_mismatch(original_domain, final_url):
+    """True if the fetched page ended up on a completely different domain
+    (squatted/parked/redirected-to-unrelated-business). Prevents scanning/extracting
+    contacts from the WRONG company."""
+    if not final_url: return False
+    try:
+        final_host = final_url.split("//")[-1].split("/")[0]
+    except Exception:
+        return False
+    return _root_domain(original_domain) != _root_domain(final_host)
+
 
 def gather_pages(base_url):
     """Returns dict {page_name: {'text':.., 'raw':..}} for homepage + key pages incl. contact.
@@ -483,6 +500,18 @@ def process_company(rec, conn):
                             last_scan_date=%s, dirty=TRUE, updated_at=now() WHERE id=%s""", (now, cid))
             conn.commit()
             with lock: stats["unreachable"] += 1
+            return
+
+        # Domain squatted/parked/redirected to an unrelated business (e.g. expired domain
+        # now hosting a completely different company) -> NEVER extract signals/contacts
+        # from the wrong company. Check against the homepage's resolved final URL.
+        home_final = pages.get("home", {}).get("final_url", "")
+        if domain_mismatch(domain, home_final):
+            cur.execute("""UPDATE industrial_company SET scan_status='domain_mismatch', scanned=TRUE,
+                            last_scan_date=%s, dirty=TRUE, updated_at=now() WHERE id=%s""", (now, cid))
+            conn.commit()
+            with lock: stats["unreachable"] += 1
+            log.info(f"  SKIP {name:38} domain mismatch: {domain} -> {home_final[:60]}")
             return
         if BLACKLIST.search(all_text[:3000]):
             cur.execute("""UPDATE industrial_company SET scan_status='blacklisted', scanned=TRUE,
