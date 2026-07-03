@@ -459,10 +459,16 @@ def extract_contact_info(pages, domain):
 
     return email, phone, linkedin
 
-def build_solution_tags(opp_scores_only, threshold):
+MIN_EVIDENCE_FOR_SOLUTION = 2  # a single ambiguous keyword match is not enough to confidently recommend a solution
+
+def build_solution_tags(opps, threshold):
+    """Only tag a solution if BOTH the score clears the threshold AND there are
+    at least MIN_EVIDENCE_FOR_SOLUTION distinct keyword matches backing it up
+    (one lone keyword hit is too weak to make a confident recommendation)."""
     tags = []
     for key in SOLUTION_ORDER:
-        if opp_scores_only.get(key, 0) >= threshold:
+        v = opps.get(key, {})
+        if v.get("score", 0) >= threshold and len(v.get("evidence", [])) >= MIN_EVIDENCE_FOR_SOLUTION:
             tags.append(OPP_CATEGORIES[key]["sol"]["default"])
     return ", ".join(tags)
 
@@ -537,7 +543,7 @@ def process_company(rec, conn):
         total_evidence = sum(len(v["evidence"]) for v in opps.values()) + len(intent_hits)
         confidence = compute_confidence(len(pages), total_evidence)
 
-        solution_tags = build_solution_tags(opp_scores_only, SIGNAL_THRESHOLD)
+        solution_tags = build_solution_tags(opps, SIGNAL_THRESHOLD)
         why_now_tags = build_why_now_tags(opps, intent_hits, jobs, SIGNAL_THRESHOLD)
         reason_parts = []
         for k, v in opps.items():
