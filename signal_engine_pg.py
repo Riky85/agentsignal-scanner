@@ -510,9 +510,33 @@ def build_solution_tags(opps, threshold):
             tags.append(OPP_CATEGORIES[key]["sol"]["default"])
     return ", ".join(tags)
 
-def build_why_now_tags(opps, intent_hits, jobs, threshold, max_tags=6):
+CURRENT_YEAR = 2026
+YEAR_RE = re.compile(r"\b(20[0-2][0-9])\b")
+
+def _is_recent_enough(pages, keyword):
+    """Recency guard: a growth/expansion mention next to an OLD year (e.g. an old press
+    release still live on the site saying 'we expanded in 2018') should NOT trigger a
+    false sense of urgency today. If no year is mentioned near the match, treat it as
+    evergreen copy and keep it (most marketing pages don't timestamp themselves)."""
+    for pdata in pages.values():
+        text = pdata["text"]
+        idx = text.find(keyword)
+        if idx == -1:
+            continue
+        window = text[max(0, idx-200):idx+200]
+        years = [int(y) for y in YEAR_RE.findall(window)]
+        if not years:
+            return True
+        return max(years) >= CURRENT_YEAR - 1  # keep only if a 2025/2026 mention is nearby
+    return True
+
+def build_why_now_tags(opps, intent_hits, jobs, threshold, pages=None, max_tags=6):
     tags = []
     growth_pool = set(intent_hits) | set(opps.get("amr_agv", {}).get("evidence", []))
+    # Recency filter: drop growth/expansion mentions that are actually stale old news
+    # (e.g. a 2017 press release about "plant expansion" still sitting on the site).
+    if pages:
+        growth_pool = {k for k in growth_pool if _is_recent_enough(pages, k)}
     for kws, tag in GROWTH_TAG_MAP:
         if any(k in growth_pool for k in kws) and tag not in tags:
             tags.append(tag)
@@ -524,6 +548,19 @@ def build_why_now_tags(opps, intent_hits, jobs, threshold, max_tags=6):
         tags.append("Quality Automation")
     if opps.get("maintenance", {}).get("score", 0) >= threshold and "Downtime Reduction" not in tags:
         tags.append("Downtime Reduction")
+    # Cross-signal boost: hiring for a role that matches a technical opportunity category
+    # already detected (e.g. hiring "robotics engineer" AND robotics signals found on-site)
+    # is a much stronger, correlated buying signal than either alone -> surface it explicitly.
+    hiring_titles = " ".join(j["title"].lower() for j in jobs)
+    role_to_opp = {"robotics": "robotics", "plc": "mes_scada", "automation": "mes_scada",
+                   "controls": "mes_scada", "mes": "mes_scada", "scada": "mes_scada",
+                   "maintenance": "maintenance", "quality": "vision", "iot": "mes_scada",
+                   "digitalization": "mes_scada", "industry 4.0": "mes_scada"}
+    for role_kw, opp_key in role_to_opp.items():
+        if role_kw in hiring_titles and opps.get(opp_key, {}).get("score", 0) >= threshold:
+            if "Hiring Matches Tech Need" not in tags:
+                tags.append("Hiring Matches Tech Need")
+            break
     return ", ".join(tags[:max_tags])
 
 # ─────────────────────────── MAIN PROCESSING ───────────────────────────
@@ -582,7 +619,7 @@ def process_company(rec, conn):
         confidence = compute_confidence(len(pages), total_evidence)
 
         solution_tags = build_solution_tags(opps, SIGNAL_THRESHOLD)
-        why_now_tags = build_why_now_tags(opps, intent_hits, jobs, SIGNAL_THRESHOLD)
+        why_now_tags = build_why_now_tags(opps, intent_hits, jobs, SIGNAL_THRESHOLD, pages=pages)
         reason_parts = []
         for k, v in opps.items():
             if v["score"] >= SIGNAL_THRESHOLD and v["evidence"]:
