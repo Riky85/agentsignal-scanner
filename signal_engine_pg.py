@@ -28,10 +28,10 @@ PG_DSN = os.environ.get("DATABASE_URL") or os.environ.get(
     "postgresql://agent:AgentSignal2026!@postgres-db.railway.internal:5432/agentsignal"
 )
 def get_conn():
-    return psycopg2.connect(PG_DSN, connect_timeout=15, cursor_factory=RealDictCursor)
+    return psycopg2.connect(PG_DSN, connect_timeout=8, cursor_factory=RealDictCursor)
 
 PORT = int(os.environ.get("PORT", 8080))
-WORKERS = int(os.environ.get("SCAN_WORKERS", 16))
+WORKERS = int(os.environ.get("SCAN_WORKERS", 28))
 SIGNAL_THRESHOLD = 8
 
 UA = {"User-Agent": "Mozilla/5.0 Chrome/124 Safari/537.36",
@@ -352,7 +352,7 @@ def make_session():
     s.mount("http://", adapter)
     return s
 
-def fetch(url, session=None, timeout=6):
+def fetch(url, session=None, timeout=5):
     """Returns {'text': cleaned lowercase text for keyword matching, 'raw': html with tags kept
     (minus script/style) for extracting hrefs like mailto:/tel:/linkedin links), 'final_url': resolved URL after redirects."""
     try:
@@ -578,7 +578,9 @@ def extract_contact_info(pages, domain):
 
     return email, phone, linkedin
 
-MIN_EVIDENCE_FOR_SOLUTION = 2  # a single ambiguous keyword match is not enough to confidently recommend a solution
+MIN_EVIDENCE_FOR_SOLUTION = 2
+MIN_EVIDENCE_HISTORICAL = 1
+HISTORICAL_CATEGORIES = {"robotics", "amr_agv", "mes_scada", "vision", "maintenance"}
 
 def build_solution_tags(opps, threshold):
     """Only tag a solution if BOTH the score clears the threshold AND there are
@@ -587,7 +589,8 @@ def build_solution_tags(opps, threshold):
     tags = []
     for key in SOLUTION_ORDER:
         v = opps.get(key, {})
-        if v.get("score", 0) >= threshold and len(v.get("evidence", [])) >= MIN_EVIDENCE_FOR_SOLUTION:
+        min_ev = MIN_EVIDENCE_HISTORICAL if key in HISTORICAL_CATEGORIES else MIN_EVIDENCE_FOR_SOLUTION
+        if v.get("score", 0) >= threshold and len(v.get("evidence", [])) >= min_ev:
             tags.append(OPP_CATEGORIES[key]["sol"]["default"])
     return ", ".join(tags)
 
@@ -796,7 +799,7 @@ def process_company(rec, conn):
         # clear the threshold in one match) would spam noisy single-signal opportunities --
         # exactly the false-positive class fixed for top_opportunity earlier today.
         qualifying = [k for k, v in opps.items()
-                      if v["score"] >= SIGNAL_THRESHOLD and len(v["evidence"]) >= MIN_EVIDENCE_FOR_SOLUTION]
+                      if v["score"] >= SIGNAL_THRESHOLD and len(v["evidence"]) >= (MIN_EVIDENCE_HISTORICAL if k in HISTORICAL_CATEGORIES else MIN_EVIDENCE_FOR_SOLUTION)]
         signals_count_total = len(qualifying)
         top_signals_list = [f"{opps[k]['cat']}:{opps[k]['score']}" for k in qualifying][:5]
         for key in qualifying:
@@ -857,7 +860,7 @@ def scan_now(name, website, industry_hint="", country_hint=""):
 
     # Live HTTP validation BEFORE any insert (same standing rule as the bulk importer)
     try:
-        r = requests.get(website, headers=UA, timeout=10, allow_redirects=True)
+        r = requests.get(website, headers=UA, timeout=8, allow_redirects=True)
         if r.status_code >= 400:
             return {"error": f"website not reachable (HTTP {r.status_code})"}
     except Exception as e:
