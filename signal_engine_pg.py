@@ -31,7 +31,7 @@ def get_conn():
     return psycopg2.connect(PG_DSN, connect_timeout=8, cursor_factory=RealDictCursor)
 
 PORT = int(os.environ.get("PORT", 8080))
-WORKERS = int(os.environ.get("SCAN_WORKERS", 28))
+WORKERS = int(os.environ.get("SCAN_WORKERS", 40))
 SIGNAL_THRESHOLD = 8
 
 UA = {"User-Agent": "Mozilla/5.0 Chrome/124 Safari/537.36",
@@ -352,7 +352,7 @@ def make_session():
     s.mount("http://", adapter)
     return s
 
-def fetch(url, session=None, timeout=5):
+def fetch(url, session=None, timeout=4):
     """Returns {'text': cleaned lowercase text for keyword matching, 'raw': html with tags kept
     (minus script/style) for extracting hrefs like mailto:/tel:/linkedin links), 'final_url': resolved URL after redirects."""
     try:
@@ -394,17 +394,13 @@ def gather_pages(base_url):
         "home": base_url,
         "products": f"{base_url}/products",
         "solutions": f"{base_url}/solutions",
-        "contact": f"{base_url}/contact",
         "careers": f"{base_url}/careers",
-        "jobs": f"{base_url}/jobs",
-        "about": f"{base_url}/about",
-        "news": f"{base_url}/news",
-        "press": f"{base_url}/press",
+        "contact": f"{base_url}/contact",
     }
     out = {}
     session = make_session()
     try:
-        with ThreadPoolExecutor(max_workers=9) as ex:
+        with ThreadPoolExecutor(max_workers=5) as ex:
             futs = {ex.submit(fetch, u, session): k for k, u in urls.items()}
             for f in as_completed(futs):
                 k = futs[f]
@@ -860,7 +856,7 @@ def scan_now(name, website, industry_hint="", country_hint=""):
 
     # Live HTTP validation BEFORE any insert (same standing rule as the bulk importer)
     try:
-        r = requests.get(website, headers=UA, timeout=8, allow_redirects=True)
+        r = requests.get(website, headers=UA, timeout=5, allow_redirects=True)
         if r.status_code >= 400:
             return {"error": f"website not reachable (HTTP {r.status_code})"}
     except Exception as e:
