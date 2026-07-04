@@ -345,9 +345,10 @@ def make_session():
     both ends. Built-in retry adapter absorbs transient 502/503/504 without extra code."""
     s = requests.Session()
     s.headers.update(UA)
-    retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[502, 503, 504],
+    retry = Retry(total=1, connect=0, read=0, status=1, backoff_factor=0.3,
+                   status_forcelist=[502, 503, 504],
                    allowed_methods=frozenset(["GET"]))
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=5, pool_maxsize=5)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
@@ -388,20 +389,27 @@ def domain_mismatch(original_domain, final_url):
 
 
 def gather_pages(base_url):
-    """Returns dict {page_name: {'text':.., 'raw':..}} for homepage + key pages incl. contact.
-    All pages share ONE session (connection reuse to the same host = faster + fewer handshakes)."""
-    urls = {
-        "home": base_url,
-        "products": f"{base_url}/products",
-        "solutions": f"{base_url}/solutions",
-        "careers": f"{base_url}/careers",
-        "contact": f"{base_url}/contact",
-    }
+    """Homepage gate: fetch homepage first. If it fails, skip subpages (dead site = no point).
+    If it succeeds, fetch the other 4 pages in parallel (same session for connection reuse)."""
+    urls = {"home": base_url}
     out = {}
     session = make_session()
     try:
-        with ThreadPoolExecutor(max_workers=5) as ex:
-            futs = {ex.submit(fetch, u, session): k for k, u in urls.items()}
+        # Gate: homepage first
+        home_result = fetch(base_url, session, timeout=5)
+        if not home_result["text"]:
+            return out, urls  # dead site, skip everything
+        out["home"] = home_result
+        # Homepage OK → fetch subpages in parallel
+        sub_urls = {
+            "products": f"{base_url}/products",
+            "solutions": f"{base_url}/solutions",
+            "careers": f"{base_url}/careers",
+            "contact": f"{base_url}/contact",
+        }
+        urls.update(sub_urls)
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futs = {ex.submit(fetch, u, session): k for k, u in sub_urls.items()}
             for f in as_completed(futs):
                 k = futs[f]
                 r = f.result()
