@@ -272,11 +272,13 @@ TECH_VENDORS = {
                        "wago","rittal","pilz safety","turck","ifm electronic","pepperl+fuchs","keyence"],
     "scada_hmi": ["wincc","ignition scada","wonderware","factorytalk","aveva","ifix","citect scada","movicon","zenon scada"],
     "mes_erp": ["sap erp","sap hana","sap s/4hana","sap business one","running on sap","sap consultant",
-                "oracle erp","microsoft dynamics","infor","epicor"," mes ","siemens opcenter","critical manufacturing",
+                "oracle erp","microsoft dynamics","infor erp","infor cloudsuite","infor ln","infor m3","infor lx",
+                "epicor","mes system","mes software","siemens opcenter","critical manufacturing",
                 "dassault delmia","plex systems","qad erp","netsuite erp","iqms","proalpha"],
     "cad_plm": ["solidworks","autocad","siemens nx","ptc creo","catia","autodesk","teamcenter","windchill plm"],
     "robotics": ["universal robots","abb robot","fanuc","kuka","yaskawa","omron robot","mobile industrial robots",
-                 " mir ","onrobot","robotiq","stäubli robotics","staubli robotics","denso robotics","epson robots"],
+                 "mir robot","mir100","mir200","mir250","mir500","mir1000","onrobot","robotiq","stäubli robotics",
+                 "staubli robotics","denso robotics","epson robots"],
     "iiot_platform": ["ptc thingworx","c3 ai","litmus edge","azure iot","aws iot","predix ge","cumulocity"],
 }
 
