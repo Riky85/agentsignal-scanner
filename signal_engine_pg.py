@@ -169,12 +169,21 @@ PLC_SOLUTIONS = {"default":"PLC/HMI retrofit","retrofit":"Control panel retrofit
 
 WMS_KW = ["warehouse management system","wms implementation","wms integration","wms rollout",
           "inventory management system","pick to light","put to light","voice picking","warehouse software",
-          "slotting optimization","yard management system","order fulfillment software"]
+          "slotting optimization","yard management system","order fulfillment software",
+          "wms system","warehouse management software","wms software","warehouse system",
+          "logistics software","inventory tracking","stock management system",
+          "rfid warehouse","barcode scanning","warehouse digitalization","warehouse optimization",
+          "lagerverwaltung","sistema di magazzino","gestion de stock","almacen automatizado"]
 WMS_SOLUTIONS = {"default":"WMS implementation","inventory":"Inventory management system","picking":"Pick-to-light system"}
 
 ERP_KW = ["erp implementation","erp migration","erp upgrade","erp rollout","erp go-live","erp consultant",
           "sap implementation","sap consultant","sap migration","sap rollout","dynamics 365 implementation",
-          "netsuite implementation","odoo implementation","erp integration project"]
+          "netsuite implementation","odoo implementation","erp integration project",
+          "enterprise resource planning","erp system","erp software","sap system","sap s/4hana",
+          "sap business one","oracle erp","microsoft dynamics","business central","dynamics 365",
+          "netsuite","odoo","infor erp","epicor","sage erp","iqms","qad erp","proalpha",
+          "production planning system","mrp system","material requirements planning",
+          "sistema gestionale","sistema erp","planungssystem","erp einführung"]
 ERP_SOLUTIONS = {"default":"ERP implementation/integration","sap":"SAP implementation","migration":"ERP migration"}
 
 CMMS_KW = ["cmms","computerized maintenance management","maintenance management software",
@@ -184,7 +193,12 @@ CMMS_SOLUTIONS = {"default":"CMMS deployment","scheduling":"Maintenance scheduli
 
 IOT_KW = ["industrial iot","iiot platform","iot sensors","connected factory","edge computing",
           "predictive analytics platform","digital twin","condition-based monitoring","remote monitoring platform",
-          "sensor network","real-time data platform","industry 4.0 platform"]
+          "sensor network","real-time data platform","industry 4.0 platform",
+          "smart factory","smart manufacturing","iot solution","iot platform","iot gateway",
+          "machine connectivity","opc ua","mqtt","machine monitoring","energy monitoring",
+          "real-time monitoring","remote monitoring","plant connectivity","io-link",
+          "connected machines","industrie 4.0","fabbrica intelligente","usine intelligente",
+          "smart sensor","industrial connectivity","cloud connectivity","edge device"]
 IOT_SOLUTIONS = {"default":"Industrial IoT / IIoT platform","twin":"Digital twin deployment","edge":"Edge computing rollout"}
 
 OPP_CATEGORIES = {
