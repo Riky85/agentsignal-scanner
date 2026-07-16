@@ -294,6 +294,22 @@ TECH_VENDORS = {
                  "mir robot","mir100","mir200","mir250","mir500","mir1000","onrobot","robotiq","stäubli robotics",
                  "staubli robotics","denso robotics","epson robots"],
     "iiot_platform": ["ptc thingworx","c3 ai","litmus edge","azure iot","aws iot","predix ge","cumulocity"],
+    # ─── NEW v2: 5 vendor categories for complete Why Not coverage ───
+    "machine_vision": ["cognex","keyence vision","basler","sick inspector","national instruments vision",
+                       "halcon","matrox imaging","teledyne dalsa","allied vision","ids imaging",
+                       "baumer","ifm vision","zeiss vision","datalogic vision","banner engineering vision"],
+    "amr_agv": ["geek+","geek plus","locus robotics","6 river systems","6river","fetch robotics",
+                "magazino","otto motors","otto 600","otto 1500","clearpath robotics",
+                "ek robotics","crawley automation","minegistics","waypoint robotics","burkhardt automation"],
+    "predictive_maintenance": ["augury","vibradeck","uptime ai","uptime.ai","breeze analytics",
+                               "tagsense","nanotronics","presenso","twaice",
+                               "limble","fiix cmms","upkeep cmms","eptura maintenance"],
+    "wms": ["manhattan associates","sap ewm","highjump","körber wms","koeber wms","blue yonder wms",
+            "infor wms","fishbowl inventory","skubana","snapfulfil","made4net","tecsys wms",
+            "boltrics","prolog wms","exotrac"],
+    "cmms": ["ibm maximo","maximo","fiix","fiix cmms","upkeep","hippo cmms","eptura",
+             "dude solutions","maintenance connection","mpulse","emaint","dpsi","fracttal",
+             "limble cmms","hoffmann facility"],
 }
 
 # ─────────────────────────── JOB TITLES ───────────────────────────
