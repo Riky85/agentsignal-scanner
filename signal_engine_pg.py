@@ -312,16 +312,20 @@ def gather_pages(base_url):
     out = {}
     session = make_session()
     try:
-        with ThreadPoolExecutor(max_workers=15) as ex:
-            futs = {ex.submit(fetch, u, session): k for k, u in urls.items()}
-            try:
-                for f in as_completed(futs, timeout=45):
-                    k = futs[f]
+        ex = ThreadPoolExecutor(max_workers=15)
+        futs = {ex.submit(fetch, u, session): k for k, u in urls.items()}
+        try:
+            for f in as_completed(futs, timeout=45):
+                k = futs[f]
+                try:
                     r = f.result()
                     if r["text"]: out[k] = r
-            except TimeoutError:
-                for f in futs:
-                    f.cancel()
+                except Exception:
+                    pass
+        except TimeoutError:
+            for f in futs:
+                f.cancel()
+        ex.shutdown(wait=False, cancel_futures=True)
     finally:
         session.close()
     return out, urls
@@ -783,15 +787,27 @@ while True:
                 log.error(f"  ERR {rec.get('name','?')[:30]}: {e}")
             finally:
                 c.close()
-        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-            futs = [ex.submit(_work, rec) for rec in batch]
-            try:
-                for f in as_completed(futs, timeout=300):
-                    pass
-            except TimeoutError:
-                log.warning(f"[C{stats['cycle']}] Batch timeout 300s — cancelling {len(futs)} pending futures")
-                for f in futs:
-                    f.cancel()
+        ex = ThreadPoolExecutor(max_workers=WORKERS)
+        futs = [ex.submit(_work, rec) for rec in batch]
+        completed = 0
+        try:
+            for f in as_completed(futs, timeout=300):
+                completed += 1
+        except TimeoutError:
+            log.warning(f"[C{stats['cycle']}] Batch timeout 300s — completed={completed}/{len(futs)} — cancelling rest")
+            for f in futs:
+                f.cancel()
+        ex.shutdown(wait=False, cancel_futures=True)
+        # Reset any companies still stuck in 'scanning' (batch timeout victims)
+        try:
+            c2 = get_conn()
+            cur2 = c2.cursor()
+            cur2.execute("UPDATE industrial_company SET scan_status='pending' WHERE scan_status='scanning' AND id = ANY(%s)", ([r[0] for r in batch],))
+            c2.commit()
+            cur2.close()
+            c2.close()
+        except Exception:
+            pass
         elapsed = time.time() - t0
         log.info(f"[C{stats['cycle']}] done in {elapsed:.0f}s — scanned={stats['scanned']} good={stats['good']} "
                  f"signals={stats['signals_created']} tech={stats['tech_created']} "
