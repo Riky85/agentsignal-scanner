@@ -28,10 +28,10 @@ PG_DSN = os.environ.get("DATABASE_URL") or os.environ.get(
     "postgresql://agent:AgentSignal2026!@postgres-db.railway.internal:5432/agentsignal"
 )
 def get_conn():
-    return psycopg2.connect(PG_DSN, connect_timeout=8, cursor_factory=RealDictCursor)
+    return psycopg2.connect(PG_DSN, connect_timeout=15, cursor_factory=RealDictCursor)
 
 PORT = int(os.environ.get("PORT", 8080))
-WORKERS = int(os.environ.get("SCAN_WORKERS", 40))
+WORKERS = int(os.environ.get("SCAN_WORKERS", 16))
 SIGNAL_THRESHOLD = 8
 
 UA = {"User-Agent": "Mozilla/5.0 Chrome/124 Safari/537.36",
@@ -42,58 +42,15 @@ stats = {"scanned":0,"unreachable":0,"errors":0,"cycle":0,"good":0,
          "queue":0,"last_qc":"never","qc":{},"status":"starting"}
 lock = threading.Lock()
 
-# ─────────────────────────── SELF-WATCHDOG ───────────────────────────
-# Root cause of past silent hangs varies (DB lock pileups, HTTP requests that never
-# time out on certain hosts, etc). Rather than chase every possible cause, this
-# watchdog forces a hard process exit if NO company has finished processing for
-# WATCHDOG_TIMEOUT seconds. The bash supervisor loop around this script (see
-# Dockerfile/railway startCommand: "while true; do python3 signal_engine_pg.py; ...")
-# immediately relaunches it, so the engine self-heals within minutes instead of
-# hanging silently for hours.
-_last_progress = {"t": time.time()}
-WATCHDOG_TIMEOUT = int(os.environ.get("WATCHDOG_TIMEOUT", 240))  # 4 minutes
-
-def _touch_progress():
-    with lock:
-        _last_progress["t"] = time.time()
-
-def _watchdog_loop():
-    while True:
-        time.sleep(20)
-        stalled_for = time.time() - _last_progress["t"]
-        if stalled_for > WATCHDOG_TIMEOUT:
-            log.error(f"WATCHDOG: no progress for {stalled_for:.0f}s (limit {WATCHDOG_TIMEOUT}s) — forcing hard restart")
-            os._exit(1)
-
-threading.Thread(target=_watchdog_loop, daemon=True).start()
-
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         b = json.dumps(stats, default=str).encode()
         self.send_response(200); self.send_header("Content-Type","application/json")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
-    def do_POST(self):
-        if self.path != "/scan-now":
-            self.send_response(404); self.end_headers(); return
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            payload = json.loads(self.rfile.read(length) or b"{}")
-            result = scan_now(
-                (payload.get("name") or "").strip(),
-                (payload.get("website") or "").strip(),
-                (payload.get("industry") or "").strip(),
-                (payload.get("country") or "").strip(),
-            )
-            status = 200 if "error" not in result else 400
-        except Exception as e:
-            result, status = {"error": str(e)}, 500
-        b = json.dumps(result, default=str).encode()
-        self.send_response(status); self.send_header("Content-Type","application/json")
-        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
 
 threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), H).serve_forever(), daemon=True).start()
-log.info(f"[OK] healthcheck+scan-now :{PORT} | workers={WORKERS} | threshold={SIGNAL_THRESHOLD} | Postgres-only")
+log.info(f"[OK] healthcheck :{PORT} | workers={WORKERS} | threshold={SIGNAL_THRESHOLD} | Postgres-only")
 
 # ─────────────────────────── INDUSTRY CLASSIFICATION ───────────────────────────
 INDUSTRY_KW = {
@@ -161,60 +118,15 @@ MAINT_KW = ["maintenance technician","downtime","preventive maintenance","predic
 MAINT_SOLUTIONS = {"default":"Predictive maintenance program","monitoring":"Maintenance monitoring platform",
                    "sensors":"Industrial IoT sensors"}
 
-# ─── Phase 2 expansion: PLC (split out from MES/SCADA), WMS, ERP-as-buying-signal, CMMS, IoT/IIoT ───
-PLC_KW = ["plc programming","plc programmer","ladder logic","structured text","siemens s7","tia portal",
-          "allen-bradley plc","beckhoff twincat","codesys","plc retrofit","plc upgrade","control panel design",
-          "electrical control panel","plc integration","function block diagram","step 7","rslogix"]
-PLC_SOLUTIONS = {"default":"PLC/HMI retrofit","retrofit":"Control panel retrofit","panel":"Electrical panel design"}
-
-WMS_KW = ["warehouse management system","wms implementation","wms integration","wms rollout",
-          "inventory management system","pick to light","put to light","voice picking","warehouse software",
-          "slotting optimization","yard management system","order fulfillment software",
-          "wms system","warehouse management software","wms software","warehouse system",
-          "logistics software","inventory tracking","stock management system",
-          "rfid warehouse","barcode scanning","warehouse digitalization","warehouse optimization",
-          "lagerverwaltung","sistema di magazzino","gestion de stock","almacen automatizado"]
-WMS_SOLUTIONS = {"default":"WMS implementation","inventory":"Inventory management system","picking":"Pick-to-light system"}
-
-ERP_KW = ["erp implementation","erp migration","erp upgrade","erp rollout","erp go-live","erp consultant",
-          "sap implementation","sap consultant","sap migration","sap rollout","dynamics 365 implementation",
-          "netsuite implementation","odoo implementation","erp integration project",
-          "enterprise resource planning","erp system","erp software","sap system","sap s/4hana",
-          "sap business one","oracle erp","microsoft dynamics","business central","dynamics 365",
-          "netsuite","odoo","infor erp","epicor","sage erp","iqms","qad erp","proalpha",
-          "production planning system","mrp system","material requirements planning",
-          "sistema gestionale","sistema erp","planungssystem","erp einführung"]
-ERP_SOLUTIONS = {"default":"ERP implementation/integration","sap":"SAP implementation","migration":"ERP migration"}
-
-CMMS_KW = ["cmms","computerized maintenance management","maintenance management software",
-           "maintenance scheduling software","asset management software","fiix cmms","upkeep cmms",
-           "maintainx","hippo cmms","emaint","work order management system"]
-CMMS_SOLUTIONS = {"default":"CMMS deployment","scheduling":"Maintenance scheduling platform","asset":"Asset management system"}
-
-IOT_KW = ["industrial iot","iiot platform","iot sensors","connected factory","edge computing",
-          "predictive analytics platform","digital twin","condition-based monitoring","remote monitoring platform",
-          "sensor network","real-time data platform","industry 4.0 platform",
-          "smart factory","smart manufacturing","iot solution","iot platform","iot gateway",
-          "machine connectivity","opc ua","mqtt","machine monitoring","energy monitoring",
-          "real-time monitoring","remote monitoring","plant connectivity","io-link",
-          "connected machines","industrie 4.0","fabbrica intelligente","usine intelligente",
-          "smart sensor","industrial connectivity","cloud connectivity","edge device"]
-IOT_SOLUTIONS = {"default":"Industrial IoT / IIoT platform","twin":"Digital twin deployment","edge":"Edge computing rollout"}
-
 OPP_CATEGORIES = {
     "robotics":  {"kw":ROBOTICS_KW, "field":"robotics_opportunity_score", "cat":"robotics", "sol":ROBOTICS_SOLUTIONS, "weight":12},
     "amr_agv":   {"kw":AMR_AGV_KW,  "field":"amr_agv_opportunity_score", "cat":"amr_agv", "sol":AMR_SOLUTIONS, "weight":12},
     "mes_scada": {"kw":MES_KW,      "field":"mes_opportunity_score", "cat":"mes_scada", "sol":MES_SOLUTIONS, "weight":8},
     "vision":    {"kw":VISION_KW,   "field":"machine_vision_opportunity_score", "cat":"machine_vision", "sol":VISION_SOLUTIONS, "weight":12},
     "maintenance":{"kw":MAINT_KW,   "field":"maintenance_opportunity_score", "cat":"maintenance", "sol":MAINT_SOLUTIONS, "weight":12},
-    "plc":       {"kw":PLC_KW,      "field":"plc_opportunity_score", "cat":"plc", "sol":PLC_SOLUTIONS, "weight":10},
-    "wms":       {"kw":WMS_KW,      "field":"wms_opportunity_score", "cat":"wms", "sol":WMS_SOLUTIONS, "weight":10},
-    "erp_signal":{"kw":ERP_KW,      "field":"erp_opportunity_score", "cat":"erp_signal", "sol":ERP_SOLUTIONS, "weight":10},
-    "cmms":      {"kw":CMMS_KW,     "field":"cmms_opportunity_score", "cat":"cmms", "sol":CMMS_SOLUTIONS, "weight":10},
-    "iot_iiot":  {"kw":IOT_KW,      "field":"iot_opportunity_score", "cat":"iot_iiot", "sol":IOT_SOLUTIONS, "weight":10},
 }
 # Display order for solution tags (matches the UI convention used before)
-SOLUTION_ORDER = ["amr_agv", "mes_scada", "plc", "vision", "robotics", "maintenance", "wms", "erp_signal", "cmms", "iot_iiot"]
+SOLUTION_ORDER = ["amr_agv", "mes_scada", "vision", "robotics", "maintenance"]
 
 # note: "hiring"/"careers"/"join our team" deliberately excluded — standard links on almost every
 # corporate site, they diluted buying intent with noise. Specific hiring is tracked via detect_jobs().
@@ -225,57 +137,36 @@ INTENT_KW = ["new manufacturing plant","new production facility","greenfield pla
              "digital transformation","industry 4.0 implementation","lean transformation",
              "manufacturing modernization","machine retrofit","equipment upgrade","production line upgrade",
              "acquisition","new plant","new machinery","sustainability investment","operational efficiency",
-             # more natural phrasing real corporate sites actually use (less formal/press-release-y)
-             "we are expanding","we're expanding","expanding our production","expanding our facility",
-             "expanding our team","growing rapidly","rapid growth","state-of-the-art facility",
-             "state of the art facility","newly built facility","newly opened facility","recently opened",
-             "grand opening","new headquarters","relocating to a new","moved to a new facility",
-             "million investment","million euro investment","multi-million investment","investing heavily",
-             "significant investment","doubling capacity","doubling production","tripling capacity",
-             "scaling up production","ramping up production","increased output","expansion project",
-             "opens new facility","opened a new facility","invests in new","recently acquired","merger",
              # German (DE/AT/CH sites are very often local-language only)
              "neue produktionslinie","kapazitätserweiterung","werkserweiterung","neues werk","investition in automatisierung",
              "digitalisierung","industrie 4.0","neubau produktion","standorterweiterung","modernisierung der produktion",
-             "wir expandieren","wir bauen aus","erweitern unsere produktion","neue niederlassung","übernahme",
              # Italian (IT sites)
              "nuovo stabilimento","ampliamento produttivo","nuova linea di produzione","investimento in automazione",
              "digitalizzazione","industria 4.0","ampliamento capacità produttiva","nuovo impianto",
-             "stiamo espandendo","espansione della produzione","nuova sede","acquisizione recente",
              # French (FR/BE/CH sites)
              "nouvelle ligne de production","extension de capacité","nouvelle usine","investissement automatisation",
-             "transformation digitale","industrie 4.0","modernisation de la production",
-             "nous investissons","nouvelle usine ouverte","nouveau siège"]
+             "transformation digitale","industrie 4.0","modernisation de la production"]
 
 # Growth/expansion signals -> short "Why Now" tags (title case, 2-3 words, English)
 GROWTH_TAG_MAP = [
     (["new production facility","new manufacturing plant","greenfield plant","new factory opening","new plant",
-      "neues werk","neubau produktion","nuovo stabilimento","nuovo impianto","nouvelle usine",
-      "state-of-the-art facility","state of the art facility","newly built facility","newly opened facility",
-      "recently opened","grand opening","opens new facility","opened a new facility","neue niederlassung",
-      "nuova sede"], "New Facility"),
+      "neues werk","neubau produktion","nuovo stabilimento","nuovo impianto","nouvelle usine"], "New Facility"),
     (["new assembly line","new production line","neue produktionslinie","nuova linea di produzione",
       "nouvelle ligne de production"], "New Production Line"),
     (["capacity expansion","production capacity increase","plant expansion","brownfield expansion",
       "kapazitätserweiterung","werkserweiterung","standorterweiterung","ampliamento produttivo",
-      "ampliamento capacità produttiva","extension de capacité","we are expanding","we're expanding",
-      "expanding our production","expanding our facility","growing rapidly","rapid growth",
-      "doubling capacity","doubling production","tripling capacity","scaling up production",
-      "ramping up production","increased output","expansion project","wir expandieren","wir bauen aus",
-      "erweitern unsere produktion","stiamo espandendo","espansione della produzione","nous investissons"], "Plant Expansion"),
+      "ampliamento capacità produttiva","extension de capacité"], "Plant Expansion"),
     (["warehouse expansion","warehouse automation"], "Warehouse Expansion"),
     (["digital transformation","industry 4.0 implementation","smart factory","digitalisierung","industrie 4.0",
       "digitalizzazione","industria 4.0","transformation digitale"], "Digital Transformation"),
     (["automation investment","equipment investment","machinery investment","technology investment",
       "capital expenditure","capex investment","investition in automatisierung","investimento in automazione",
-      "investissement automatisation","million investment","million euro investment","multi-million investment",
-      "investing heavily","significant investment"], "Automation Investment"),
-    (["acquisition","recently acquired","merger","übernahme","acquisizione recente"], "Recent Acquisition"),
+      "investissement automatisation"], "Automation Investment"),
+    (["acquisition"], "Recent Acquisition"),
     (["machine retrofit","equipment upgrade","production line upgrade","modernisierung der produktion"], "Equipment Upgrade"),
     (["sustainability investment"], "Sustainability Investment"),
     (["lean transformation","manufacturing modernization"], "Manufacturing Modernization"),
-    (["new machinery","invests in new"], "New Machinery"),
-    (["new headquarters","relocating to a new","moved to a new facility","nouveau siège"], "Relocation/HQ Move"),
+    (["new machinery"], "New Machinery"),
 ]
 
 # ─────────────────────────── TECHNOLOGY VENDORS ───────────────────────────
@@ -294,7 +185,7 @@ TECH_VENDORS = {
                  "mir robot","mir100","mir200","mir250","mir500","mir1000","onrobot","robotiq","stäubli robotics",
                  "staubli robotics","denso robotics","epson robots"],
     "iiot_platform": ["ptc thingworx","c3 ai","litmus edge","azure iot","aws iot","predix ge","cumulocity"],
-    # ─── NEW v2: 5 vendor categories for complete Why Not coverage ───
+    # ─── NEW: 5 vendor categories for complete Why Not coverage ───
     "machine_vision": ["cognex","keyence vision","basler","sick inspector","national instruments vision",
                        "halcon","matrox imaging","teledyne dalsa","allied vision","ids imaging",
                        "baumer","ifm vision","zeiss vision","datalogic vision","banner engineering vision"],
@@ -302,7 +193,7 @@ TECH_VENDORS = {
                 "magazino","otto motors","otto 600","otto 1500","clearpath robotics",
                 "ek robotics","crawley automation","minegistics","waypoint robotics","burkhardt automation"],
     "predictive_maintenance": ["augury","vibradeck","uptime ai","uptime.ai","breeze analytics",
-                               "tagsense","nanotronics","presenso","twaice",
+                               "tagsense","nanotronics","presenso","twaice","despacito",
                                "limble","fiix cmms","upkeep cmms","eptura maintenance"],
     "wms": ["manhattan associates","sap ewm","highjump","körber wms","koeber wms","blue yonder wms",
             "infor wms","fishbowl inventory","skubana","snapfulfil","made4net","tecsys wms",
@@ -318,11 +209,7 @@ JOB_TITLES = ["automation engineer","plc programmer","robotics engineer","manufa
               "cnc operator","warehouse operator","logistics manager","quality control technician",
               "mes specialist","scada engineer","controls engineer","plant manager","operations manager",
               "automation technician","controls technician","robotics technician","iot engineer",
-              "digitalization manager","industry 4.0 manager","lean manufacturing engineer","continuous improvement engineer",
-              # broader roles that appear far more often on real careers pages than the specialist titles above
-              "machine operator","cnc machinist","assembly line worker","forklift operator","warehouse associate",
-              "welder","field service technician","supply chain manager","procurement manager","shift supervisor",
-              "quality engineer","supply chain planner","production supervisor","maintenance engineer","project engineer"]
+              "digitalization manager","industry 4.0 manager","lean manufacturing engineer","continuous improvement engineer"]
 
 # Short "Hiring X" why-now tags per job title
 JOB_TAG_MAP = {
@@ -342,8 +229,7 @@ JOB_TAG_MAP = {
 }
 
 TOP_LABELS = {"robotics":"Robotics & Cobot","amr_agv":"AMR / AGV","mes_scada":"MES/SCADA/OEE",
-              "vision":"Machine Vision","maintenance":"Predictive Maintenance","plc":"PLC / Controls",
-              "wms":"WMS","erp_signal":"ERP","cmms":"CMMS","iot_iiot":"IoT / IIoT"}
+              "vision":"Machine Vision","maintenance":"Predictive Maintenance"}
 
 BLACKLIST = re.compile(
     r'\b(law firm|legal services|avvocato|anwaltskanzlei|real estate agent|immobilienmakler|'
@@ -377,17 +263,16 @@ def make_session():
     both ends. Built-in retry adapter absorbs transient 502/503/504 without extra code."""
     s = requests.Session()
     s.headers.update(UA)
-    retry = Retry(total=1, connect=0, read=0, status=1, backoff_factor=0.3,
-                   status_forcelist=[502, 503, 504],
+    retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[502, 503, 504],
                    allowed_methods=frozenset(["GET"]))
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=5, pool_maxsize=5)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
 
-def fetch(url, session=None, timeout=4):
+def fetch(url, session=None, timeout=6):
     """Returns {'text': cleaned lowercase text for keyword matching, 'raw': html with tags kept
-    (minus script/style) for extracting hrefs like mailto:/tel:/linkedin links), 'final_url': resolved URL after redirects."""
+    (minus script/style) for extracting hrefs like mailto:/tel:/linkedin links)."""
     try:
         req = session or requests
         r = req.get(url, timeout=timeout, verify=False, allow_redirects=True,
@@ -398,50 +283,37 @@ def fetch(url, session=None, timeout=4):
             raw_clean = re.sub(r'<style[^>]*>.*?</style>', '', raw_clean, flags=re.S)
             text = re.sub(r'<[^>]+>', ' ', raw_clean)
             text = re.sub(r'\s+', ' ', text).lower()[:15000]
-            return {"text": text, "raw": raw_clean[:40000], "final_url": r.url}
+            return {"text": text, "raw": raw_clean[:40000]}
     except Exception:
         pass
-    return {"text": "", "raw": "", "final_url": ""}
-
-def _root_domain(host):
-    host = (host or "").lower().replace("www.", "").split(":")[0]
-    parts = host.split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host
-
-def domain_mismatch(original_domain, final_url):
-    """True if the fetched page ended up on a completely different domain
-    (squatted/parked/redirected-to-unrelated-business). Prevents scanning/extracting
-    contacts from the WRONG company."""
-    if not final_url: return False
-    try:
-        final_host = final_url.split("//")[-1].split("/")[0]
-    except Exception:
-        return False
-    return _root_domain(original_domain) != _root_domain(final_host)
-
+    return {"text": "", "raw": ""}
 
 def gather_pages(base_url):
-    """Homepage gate: fetch homepage first. If it fails, skip subpages (dead site = no point).
-    If it succeeds, fetch the other 4 pages in parallel (same session for connection reuse)."""
-    urls = {"home": base_url}
+    """Returns dict {page_name: {'text':.., 'raw':..}} for homepage + key pages incl. contact.
+    Scrapes up to 15 pages per site (home + 14 subpages) for maximum signal coverage.
+    All pages share ONE session (connection reuse to the same host = faster + fewer handshakes)."""
+    urls = {
+        "home": base_url,
+        "products": f"{base_url}/products",
+        "solutions": f"{base_url}/solutions",
+        "contact": f"{base_url}/contact",
+        "careers": f"{base_url}/careers",
+        "jobs": f"{base_url}/jobs",
+        "about": f"{base_url}/about",
+        "news": f"{base_url}/news",
+        "press": f"{base_url}/press",
+        "technology": f"{base_url}/technology",
+        "innovation": f"{base_url}/innovation",
+        "automation": f"{base_url}/automation",
+        "industry": f"{base_url}/industry",
+        "manufacturing": f"{base_url}/manufacturing",
+        "solutions-industry": f"{base_url}/solutions-industry",
+    }
     out = {}
     session = make_session()
     try:
-        # Gate: homepage first
-        home_result = fetch(base_url, session, timeout=5)
-        if not home_result["text"]:
-            return out, urls  # dead site, skip everything
-        out["home"] = home_result
-        # Homepage OK → fetch subpages in parallel
-        sub_urls = {
-            "products": f"{base_url}/products",
-            "solutions": f"{base_url}/solutions",
-            "careers": f"{base_url}/careers",
-            "contact": f"{base_url}/contact",
-        }
-        urls.update(sub_urls)
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            futs = {ex.submit(fetch, u, session): k for k, u in sub_urls.items()}
+        with ThreadPoolExecutor(max_workers=15) as ex:
+            futs = {ex.submit(fetch, u, session): k for k, u in urls.items()}
             for f in as_completed(futs):
                 k = futs[f]
                 r = f.result()
@@ -498,13 +370,6 @@ def detect_technologies(pages, page_urls, base_url):
                     break
     return found
 
-GENERIC_HIRING_MARKERS = ["open position","open positions","current openings","current opening",
-    "job opening","job openings","vacancy","vacancies","we are hiring","we're hiring","join our team",
-    "join our growing team","apply now","apply today","view all jobs","browse jobs","open roles","current vacancies",
-    # DE/IT/FR equivalents so non-English careers pages are not silently ignored
-    "offene stellen","wir stellen ein","jobangebote","posizioni aperte","stiamo assumendo","offerte di lavoro",
-    "postes ouverts","nous recrutons","offres d'emploi"]
-
 def detect_jobs(pages, page_urls, base_url):
     found = []
     careers_url = page_urls.get("careers", f"{base_url}/careers")
@@ -521,12 +386,6 @@ def detect_jobs(pages, page_urls, base_url):
             kws = [k for k in INTENT_KW if k in snippet] + [title]
             found.append({"title": title.title(), "snippet": snippet[:400],
                           "keywords": list(set(kws)), "url": careers_url})
-    # Fallback: no specific title matched, but the careers page clearly has real, current
-    # hiring content (not just a bare nav link) -> weaker but still real "Active Hiring" signal.
-    if not found and len(careers_text.strip()) > 400:
-        if any(m in careers_text for m in GENERIC_HIRING_MARKERS):
-            found.append({"title": "Active Hiring", "snippet": careers_text[:400],
-                          "keywords": [], "url": careers_url})
     return found[:10]
 
 def compute_buying_intent(pages, page_urls, base_url):
@@ -540,15 +399,9 @@ def compute_buying_intent(pages, page_urls, base_url):
     return min(100, len(hits) * 10), hits[:8], hit_urls
 
 def compute_fit_score(employee_count, industry_cat, opp_scores):
-    # TAM focus (2026-07-03): companies in the 50-5,000 employee range are the priority
-    # segment (real budget, still reachable) -- score them highest, without hard-excluding
-    # anyone outside that range (unknown/small/huge companies still get scanned and scored).
-    emp_fit = 55  # unknown employee_count
-    if employee_count:
-        if 50 <= employee_count <= 5000: emp_fit = 95
-        elif employee_count > 5000: emp_fit = 75
-        elif employee_count >= 20: emp_fit = 70
-        else: emp_fit = 50
+    emp_fit = 60
+    if employee_count and employee_count > 20: emp_fit = 80
+    if employee_count and employee_count > 200: emp_fit = 95
     industry_fit = 90 if industry_cat != "Other" else 50
     signal_fit = min(100, max(opp_scores.values(), default=0))
     return round(emp_fit*0.3 + industry_fit*0.3 + signal_fit*0.4)
@@ -614,75 +467,27 @@ def extract_contact_info(pages, domain):
 
     return email, phone, linkedin
 
-MIN_EVIDENCE_FOR_SOLUTION = 2
-MIN_EVIDENCE_HISTORICAL = 1
-HISTORICAL_CATEGORIES = {"robotics", "amr_agv", "mes_scada", "vision", "maintenance"}
-
-def build_solution_tags(opps, threshold):
-    """Only tag a solution if BOTH the score clears the threshold AND there are
-    at least MIN_EVIDENCE_FOR_SOLUTION distinct keyword matches backing it up
-    (one lone keyword hit is too weak to make a confident recommendation)."""
+def build_solution_tags(opp_scores_only, threshold):
     tags = []
     for key in SOLUTION_ORDER:
-        v = opps.get(key, {})
-        min_ev = MIN_EVIDENCE_HISTORICAL if key in HISTORICAL_CATEGORIES else MIN_EVIDENCE_FOR_SOLUTION
-        if v.get("score", 0) >= threshold and len(v.get("evidence", [])) >= min_ev:
+        if opp_scores_only.get(key, 0) >= threshold:
             tags.append(OPP_CATEGORIES[key]["sol"]["default"])
     return ", ".join(tags)
 
-CURRENT_YEAR = 2026
-YEAR_RE = re.compile(r"\b(20[0-2][0-9])\b")
-
-def _is_recent_enough(pages, keyword):
-    """Recency guard: a growth/expansion mention next to an OLD year (e.g. an old press
-    release still live on the site saying 'we expanded in 2018') should NOT trigger a
-    false sense of urgency today. If no year is mentioned near the match, treat it as
-    evergreen copy and keep it (most marketing pages don't timestamp themselves)."""
-    for pdata in pages.values():
-        text = pdata["text"]
-        idx = text.find(keyword)
-        if idx == -1:
-            continue
-        window = text[max(0, idx-200):idx+200]
-        years = [int(y) for y in YEAR_RE.findall(window)]
-        if not years:
-            return True
-        return max(years) >= CURRENT_YEAR - 1  # keep only if a 2025/2026 mention is nearby
-    return True
-
-def build_why_now_tags(opps, intent_hits, jobs, threshold, pages=None, max_tags=6):
+def build_why_now_tags(opps, intent_hits, jobs, threshold, max_tags=6):
     tags = []
     growth_pool = set(intent_hits) | set(opps.get("amr_agv", {}).get("evidence", []))
-    # Recency filter: drop growth/expansion mentions that are actually stale old news
-    # (e.g. a 2017 press release about "plant expansion" still sitting on the site).
-    if pages:
-        growth_pool = {k for k in growth_pool if _is_recent_enough(pages, k)}
     for kws, tag in GROWTH_TAG_MAP:
         if any(k in growth_pool for k in kws) and tag not in tags:
             tags.append(tag)
     for j in jobs:
-        t = j["title"] if j["title"] == "Active Hiring" else JOB_TAG_MAP.get(j["title"].lower(), f"Hiring {j['title']}")
+        t = JOB_TAG_MAP.get(j["title"].lower(), f"Hiring {j['title']}")
         if t not in tags:
             tags.append(t)
     if opps.get("vision", {}).get("score", 0) >= threshold and "Quality Automation" not in tags:
         tags.append("Quality Automation")
     if opps.get("maintenance", {}).get("score", 0) >= threshold and "Downtime Reduction" not in tags:
         tags.append("Downtime Reduction")
-    # Cross-signal boost: hiring for a role that matches a technical opportunity category
-    # already detected (e.g. hiring "robotics engineer" AND robotics signals found on-site)
-    # is a much stronger, correlated buying signal than either alone -> surface it explicitly.
-    hiring_titles = " ".join(j["title"].lower() for j in jobs)
-    role_to_opp = {"robotics": "robotics", "plc": "plc", "automation": "mes_scada",
-                   "controls": "plc", "controls programmer": "plc", "mes": "mes_scada", "scada": "mes_scada",
-                   "maintenance": "maintenance", "reliability": "cmms", "quality": "vision",
-                   "iot": "iot_iiot", "iot solutions architect": "iot_iiot",
-                   "digitalization": "mes_scada", "industry 4.0": "mes_scada",
-                   "sap": "erp_signal", "erp": "erp_signal", "wms": "wms", "warehouse systems": "wms"}
-    for role_kw, opp_key in role_to_opp.items():
-        if role_kw in hiring_titles and opps.get(opp_key, {}).get("score", 0) >= threshold:
-            if "Hiring Matches Tech Need" not in tags:
-                tags.append("Hiring Matches Tech Need")
-            break
     return ", ".join(tags[:max_tags])
 
 # ─────────────────────────── MAIN PROCESSING ───────────────────────────
@@ -703,26 +508,12 @@ def process_company(rec, conn):
                             last_scan_date=%s, dirty=TRUE, updated_at=now() WHERE id=%s""", (now, cid))
             conn.commit()
             with lock: stats["unreachable"] += 1
-            _touch_progress()
-            return
-
-        # Domain squatted/parked/redirected to an unrelated business (e.g. expired domain
-        # now hosting a completely different company) -> NEVER extract signals/contacts
-        # from the wrong company. Check against the homepage's resolved final URL.
-        home_final = pages.get("home", {}).get("final_url", "")
-        if domain_mismatch(domain, home_final):
-            cur.execute("""UPDATE industrial_company SET scan_status='domain_mismatch', scanned=TRUE,
-                            last_scan_date=%s, dirty=TRUE, updated_at=now() WHERE id=%s""", (now, cid))
-            conn.commit()
-            with lock: stats["unreachable"] += 1
-            log.info(f"  SKIP {name:38} domain mismatch: {domain} -> {home_final[:60]}")
             return
         if BLACKLIST.search(all_text[:3000]):
             cur.execute("""UPDATE industrial_company SET scan_status='blacklisted', scanned=TRUE,
                             last_scan_date=%s, dirty=TRUE, updated_at=now() WHERE id=%s""", (now, cid))
             conn.commit()
             with lock: stats["unreachable"] += 1
-            _touch_progress()
             return
 
         industry_cat = classify_industry(all_text)
@@ -737,21 +528,13 @@ def process_company(rec, conn):
         fit_score = compute_fit_score(emp, industry_cat, opp_scores_only)
         top_key = max(opp_scores_only, key=opp_scores_only.get)
         top_score = opp_scores_only[top_key]
-        # BUG FIX (2026-07-03): max() on an all-zero dict just returns the first key
-        # ("robotics") regardless of any real evidence, mislabeling every zero-signal
-        # company as "Robotics & Cobot". Only assign a top_opportunity label/deal range
-        # when the winning category actually cleared the signal threshold.
-        if top_score >= SIGNAL_THRESHOLD:
-            top_label = TOP_LABELS.get(top_key, top_key)
-            dmin, dmax = deal_range(emp, top_score)
-        else:
-            top_label = None
-            dmin, dmax = None, None
+        top_label = TOP_LABELS.get(top_key, top_key)
+        dmin, dmax = deal_range(emp, top_score)
         total_evidence = sum(len(v["evidence"]) for v in opps.values()) + len(intent_hits)
         confidence = compute_confidence(len(pages), total_evidence)
 
-        solution_tags = build_solution_tags(opps, SIGNAL_THRESHOLD)
-        why_now_tags = build_why_now_tags(opps, intent_hits, jobs, SIGNAL_THRESHOLD, pages=pages)
+        solution_tags = build_solution_tags(opp_scores_only, SIGNAL_THRESHOLD)
+        why_now_tags = build_why_now_tags(opps, intent_hits, jobs, SIGNAL_THRESHOLD)
         reason_parts = []
         for k, v in opps.items():
             if v["score"] >= SIGNAL_THRESHOLD and v["evidence"]:
@@ -766,8 +549,6 @@ def process_company(rec, conn):
             UPDATE industrial_company SET
                 automation_readiness_score=%s, robotics_opportunity_score=%s, amr_agv_opportunity_score=%s,
                 mes_opportunity_score=%s, machine_vision_opportunity_score=%s, maintenance_opportunity_score=%s,
-                plc_opportunity_score=%s, wms_opportunity_score=%s, erp_opportunity_score=%s,
-                cmms_opportunity_score=%s, iot_opportunity_score=%s,
                 buying_intent_score=%s, fit_score=%s, confidence_score=%s, industry_category=%s,
                 estimated_deal_value_min=%s, estimated_deal_value_max=%s,
                 scan_status='completed', scanned=TRUE, last_scan_date=%s,
@@ -779,10 +560,7 @@ def process_company(rec, conn):
             max(opp_scores_only.get("robotics",0), opp_scores_only.get("mes_scada",0)),
             opp_scores_only.get("robotics",0), opp_scores_only.get("amr_agv",0),
             opp_scores_only.get("mes_scada",0), opp_scores_only.get("vision",0),
-            opp_scores_only.get("maintenance",0),
-            opp_scores_only.get("plc",0), opp_scores_only.get("wms",0), opp_scores_only.get("erp_signal",0),
-            opp_scores_only.get("cmms",0), opp_scores_only.get("iot_iiot",0),
-            buying_intent, fit_score, confidence,
+            opp_scores_only.get("maintenance",0), buying_intent, fit_score, confidence,
             industry_cat, dmin, dmax, now, top_label, solution_tags, why_now_tags,
             email, phone, linkedin_url, cid
         ))
@@ -824,33 +602,18 @@ def process_company(rec, conn):
                 cid, domain, j["title"], j["snippet"], j["url"], j["keywords"], now))
             n_jobs += 1
 
-        # CASCADE (2026-07-03 expansion): write ONE opportunity row per qualifying category,
-        # not just the single "top" one -- a company hiring a PLC engineer + expanding the plant
-        # can genuinely need PLC retrofit AND MES AND a robot cell at the same time. Each row keeps
-        # its own category-specific score/deal-range so each is independently actionable in the UI,
-        # while `signals_count`/`top_signals` still summarize the full picture on every row.
         n_opp = 0
-        # Same safeguard as solution tags: require >=2 distinct evidence keywords, not just
-        # score>=threshold, otherwise a single ambiguous keyword hit (weight 10-12 categories
-        # clear the threshold in one match) would spam noisy single-signal opportunities --
-        # exactly the false-positive class fixed for top_opportunity earlier today.
-        qualifying = [k for k, v in opps.items()
-                      if v["score"] >= SIGNAL_THRESHOLD and len(v["evidence"]) >= (MIN_EVIDENCE_HISTORICAL if k in HISTORICAL_CATEGORIES else MIN_EVIDENCE_FOR_SOLUTION)]
-        signals_count_total = len(qualifying)
-        top_signals_list = [f"{opps[k]['cat']}:{opps[k]['score']}" for k in qualifying][:5]
-        for key in qualifying:
-            v = opps[key]
-            opp_dmin, opp_dmax = deal_range(emp, v["score"])
+        if top_score >= SIGNAL_THRESHOLD:
             cur.execute("""INSERT INTO industrial_opportunity
                 (company_id, company_name, company_domain, opportunity_type, recommended_solution,
                  opportunity_score, buying_intent_score, estimated_deal_value_min, estimated_deal_value_max,
                  reason_summary, signals_count, top_signals)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (
-                cid, rec.get("name",""), domain, TOP_LABELS.get(key, key), v["solution"],
-                v["score"], buying_intent, opp_dmin, opp_dmax,
-                f"{v['cat']}: {', '.join(v['evidence'][:3])}" if v["evidence"] else reason_summary,
-                signals_count_total, top_signals_list))
-            n_opp += 1
+                cid, rec.get("name",""), domain, top_label, solution_tags or opps[top_key]["solution"],
+                fit_score, buying_intent, dmin, dmax, reason_summary,
+                sum(1 for v in opps.values() if v["score"] >= SIGNAL_THRESHOLD),
+                [f"{v['cat']}:{v['score']}" for v in opps.values() if v["score"] >= SIGNAL_THRESHOLD][:5]))
+            n_opp = 1
         conn.commit()
 
         with lock:
@@ -863,81 +626,12 @@ def process_company(rec, conn):
         log.info(f"  OK {name:38} {industry_cat[:18]:18} fit={fit_score:3d} bi={buying_intent:3d} "
                  f"sol=[{solution_tags[:40]:40}] why=[{why_now_tags[:40]:40}] "
                  f"sig={n_sig} tech={n_tech} jobs={n_jobs} opp={n_opp} email={'Y' if email else 'N'} phone={'Y' if phone else 'N'}")
-        _touch_progress()
     except Exception as e:
         conn.rollback()
         with lock: stats["errors"] += 1
         log.warning(f"  ERR {domain}: {str(e)[:150]}")
-        _touch_progress()
     finally:
         cur.close()
-
-# ─────────────────────────── ON-DEMAND SCAN (manual "Add Company") ───────────────────────────
-PLATFORM_BLOCKLIST_SCAN = ["facebook.com","google.com","linkedin.com","instagram.com","amazon.com",
-    "shopify.com","twitter.com","x.com","youtube.com","wikipedia.org"]
-
-def scan_now(name, website, industry_hint="", country_hint=""):
-    """Runs the SAME real detection pipeline used by the background scanner, synchronously,
-    for a single manually-submitted company. Live HTTP validation happens first (same rule as
-    bulk import). Upserts into the master Postgres table (dedup by domain) and returns the
-    fully enriched result so the caller (e.g. the app's 'Add Company' button) can display it
-    immediately instead of waiting for the next batch sync."""
-    if not name or not website:
-        return {"error": "name and website are required"}
-    if not website.startswith("http"):
-        website = "https://" + website
-    try:
-        host = website.split("//")[-1].split("/")[0].lower()
-    except Exception:
-        return {"error": "invalid website URL"}
-    domain = host[4:] if host.startswith("www.") else host
-    if any(b in domain for b in PLATFORM_BLOCKLIST_SCAN):
-        return {"error": "social/platform URLs are not accepted, please provide the company's own website"}
-
-    # Live HTTP validation BEFORE any insert (same standing rule as the bulk importer)
-    try:
-        r = requests.get(website, headers=UA, timeout=5, allow_redirects=True)
-        if r.status_code >= 400:
-            return {"error": f"website not reachable (HTTP {r.status_code})"}
-    except Exception as e:
-        return {"error": f"website not reachable: {str(e)[:150]}"}
-
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT id FROM industrial_company WHERE domain=%s", (domain,))
-        existing = cur.fetchone()
-        if existing:
-            cid = existing["id"]
-            cur.execute("""UPDATE industrial_company SET name=%s, website_url=%s,
-                            industry=COALESCE(NULLIF(%s,''), industry), country=COALESCE(NULLIF(%s,''), country),
-                            scan_status='processing', updated_at=now() WHERE id=%s""",
-                        (name, website, industry_hint, country_hint, cid))
-        else:
-            cur.execute("""INSERT INTO industrial_company
-                (name, domain, website_url, industry, country, source, scan_status, scanned, dirty, created_at, updated_at)
-                VALUES (%s,%s,%s,%s,%s,'manual_add','processing',FALSE,TRUE, now(), now())
-                RETURNING id""",
-                (name, domain, website, industry_hint or None, country_hint or None))
-            cid = cur.fetchone()["id"]
-        conn.commit()
-    finally:
-        cur.close()
-
-    rec = {"id": cid, "name": name, "domain": domain, "website_url": website, "employee_count": None}
-    process_company(rec, conn)  # runs the exact same detection + signal/tech/opportunity inserts as the background scanner
-
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT * FROM industrial_company WHERE id=%s", (cid,))
-        company = dict(cur.fetchone())
-        cur.execute("""SELECT signal_category, signal_type, evidence_text, source_url, confidence_score
-                       FROM industrial_signal WHERE company_id=%s ORDER BY detected_at DESC LIMIT 20""", (cid,))
-        signals = [dict(r) for r in cur.fetchall()]
-    finally:
-        cur.close()
-        conn.close()
-    return {"company": company, "signals": signals}
 
 def _norm_name(n):
     import unicodedata
@@ -1042,8 +736,7 @@ def load_pending(conn, limit=200):
     cur.execute("""
         SELECT id, name, domain, website_url, employee_count, country, scan_status
         FROM industrial_company WHERE scan_status='pending'
-        ORDER BY (employee_count IS NOT NULL AND employee_count BETWEEN 50 AND 5000) DESC,
-                 (country = ANY(%s)) DESC, id ASC
+        ORDER BY (country = ANY(%s)) DESC, id ASC
         LIMIT %s
     """, (list(PRIORITY), limit))
     rows = cur.fetchall()
