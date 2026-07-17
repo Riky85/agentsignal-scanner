@@ -263,9 +263,9 @@ def make_session():
     both ends. Built-in retry adapter absorbs transient 502/503/504 without extra code."""
     s = requests.Session()
     s.headers.update(UA)
-    retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[502, 503, 504],
+    retry = Retry(total=2, backoff_factor=0.3, status_forcelist=[502, 503, 504],
                    allowed_methods=frozenset(["GET"]))
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
