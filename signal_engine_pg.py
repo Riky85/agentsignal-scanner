@@ -263,14 +263,14 @@ def make_session():
     both ends. Built-in retry adapter absorbs transient 502/503/504 without extra code."""
     s = requests.Session()
     s.headers.update(UA)
-    retry = Retry(total=2, backoff_factor=0.3, status_forcelist=[502, 503, 504],
+    retry = Retry(total=1, backoff_factor=0.3, status_forcelist=[502, 503, 504],
                    allowed_methods=frozenset(["GET"]))
     adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
 
-def fetch(url, session=None, timeout=6):
+def fetch(url, session=None, timeout=4):
     """Returns {'text': cleaned lowercase text for keyword matching, 'raw': html with tags kept
     (minus script/style) for extracting hrefs like mailto:/tel:/linkedin links)."""
     try:
@@ -314,10 +314,14 @@ def gather_pages(base_url):
     try:
         with ThreadPoolExecutor(max_workers=15) as ex:
             futs = {ex.submit(fetch, u, session): k for k, u in urls.items()}
-            for f in as_completed(futs):
-                k = futs[f]
-                r = f.result()
-                if r["text"]: out[k] = r
+            try:
+                for f in as_completed(futs, timeout=45):
+                    k = futs[f]
+                    r = f.result()
+                    if r["text"]: out[k] = r
+            except TimeoutError:
+                for f in futs:
+                    f.cancel()
     finally:
         session.close()
     return out, urls
@@ -491,6 +495,11 @@ def build_why_now_tags(opps, intent_hits, jobs, threshold, max_tags=6):
     return ", ".join(tags[:max_tags])
 
 # ─────────────────────────── MAIN PROCESSING ───────────────────────────
+import signal as _signal
+
+def _company_timeout_handler(signum, frame):
+    raise TimeoutError("Company processing exceeded 90s")
+
 def process_company(rec, conn):
     name = (rec.get("name") or rec.get("domain") or "?")[:40]
     domain = rec.get("domain","?")
@@ -768,12 +777,21 @@ while True:
             c = get_conn()
             try:
                 process_company(rec, c)
+            except Exception as e:
+                with lock:
+                    stats["errors"] += 1
+                log.error(f"  ERR {rec.get('name','?')[:30]}: {e}")
             finally:
                 c.close()
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             futs = [ex.submit(_work, rec) for rec in batch]
-            for f in as_completed(futs):
-                pass
+            try:
+                for f in as_completed(futs, timeout=300):
+                    pass
+            except TimeoutError:
+                log.warning(f"[C{stats['cycle']}] Batch timeout 300s — cancelling {len(futs)} pending futures")
+                for f in futs:
+                    f.cancel()
         elapsed = time.time() - t0
         log.info(f"[C{stats['cycle']}] done in {elapsed:.0f}s — scanned={stats['scanned']} good={stats['good']} "
                  f"signals={stats['signals_created']} tech={stats['tech_created']} "
