@@ -860,7 +860,7 @@ def process_company(rec, conn):
         opps, vendor_flags, industry_cat = detect_opportunities(pages, page_urls, base_url, db_industry)
         techs = detect_technologies(pages, page_urls, base_url)
         jobs = detect_jobs(pages, page_urls, base_url)
-        buying_intent, intent_hits, intent_urls = compute_buying_intent(pages, page_urls, base_url)
+        raw_intent, intent_hits, intent_urls = compute_buying_intent(pages, page_urls, base_url)
         email, phone, linkedin_url = extract_contact_info(pages, domain)
 
         emp = int(float(rec.get("employee_count") or 0)) or None
@@ -878,6 +878,11 @@ def process_company(rec, conn):
             top_label = None
 
         dmin, dmax = deal_range(emp, top_score)
+
+        # buying_intent = max(temporal signals, top opportunity * 0.7)
+        # This ensures companies with strong opportunities but no explicit expansion news
+        # still get a meaningful buying_intent (the Decision Engine can further refine)
+        buying_intent = max(raw_intent, int(top_score * 0.7)) if top_score >= OPP_THRESHOLD else raw_intent
 
         strong_ev = sum(1 for k, v in opps.items()
                         if v["score"] >= OPP_THRESHOLD and not v["vendor"]
